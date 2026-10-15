@@ -103,7 +103,7 @@ export function renderHtml(status) {
 <meta http-equiv="refresh" content="${status.refresh_sec}"/><title>Medusa observability dashboard</title><style>
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,sans-serif;background:#0b0f14;color:#e6edf3}
 header{padding:18px 24px;border-bottom:1px solid #243041;background:#111822}h1{margin:0 0 4px;font-size:20px}.meta{color:#8b9bb4}
-nav{display:flex;gap:6px;padding:12px 24px 0;flex-wrap:wrap}.tab{background:#121a24;color:#e6edf3;border:1px solid #243041;border-bottom:none;border-radius:8px 8px 0 0;padding:8px 14px;cursor:pointer}.tab.on{background:#1b2633}
+nav{display:flex;gap:6px;padding:12px 24px 0;flex-wrap:wrap;border-bottom:1px solid #243041}.tab{background:#121a24;color:#8b9bb4;border:1px solid #243041;border-bottom:none;border-radius:8px 8px 0 0;padding:10px 16px;cursor:pointer;font-weight:600;opacity:.72;transition:background .15s,color .15s,box-shadow .15s,opacity .15s}.tab:hover{opacity:1;color:#e6edf3}.tab.on{background:#0d2a2a;color:#ffffff;border-color:#00ffcc;border-bottom:2px solid #00ffcc;opacity:1;box-shadow:0 0 0 1px #00ffcc,0 0 18px rgba(0,255,204,.55),0 0 36px rgba(0,255,204,.25);text-shadow:0 0 10px rgba(0,255,204,.45)}
 .pane{display:none;padding:16px 24px;gap:18px}.pane.on{display:grid}main{padding:0 24px 24px}
 section{background:#121a24;border:1px solid #243041;border-radius:12px;padding:14px 18px}h2{margin:0 0 10px;font-size:15px;color:#9ecbff}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 9px;border-bottom:1px solid #1e2a3a;vertical-align:top}th{color:#8b9bb4;font-size:12px;text-transform:uppercase}
