@@ -20,7 +20,7 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 
 ## Principles
 1. **Golden Rule: official docs first.** Every skill starts with the docs, and every lesson cites a doc or is marked UNVERIFIED.
-2. **Bitter-lesson engineering.** 18 thin tools, zero dependencies, and judgment left to the model and the skills. There's no rules engine. A tool exists only where raw access would be unsafe or awkward.
+2. **Bitter-lesson engineering.** 19 thin tools, zero dependencies, and judgment left to the model and the skills. There's no rules engine. A tool exists only where raw access would be unsafe or awkward.
 3. **Compound engineering.** Every fix becomes a skill rule plus a `LESSON` regression test, logged in [docs/LESSONS.md](docs/LESSONS.md). The loop lives in `skills/compound-learnings`.
 4. **Safe by default.** Reads are the default. Writes are dry-run unless `confirm=true`. By default, products are **only created or edited as drafts**. Publishing, live edits, live prices and stock need the operator opt-in `MEDUSA_ALLOW_PUBLISH=true` **and** `confirm=true` on each call. Orders come back PII-minimal unless you explicitly opt in.
 5. **Fail loud.** Missing config, a bad key, an unreachable backend, or a draft that reads back with the wrong status all produce `FAIL` or `ERROR`, never a silent pass. Keys are redacted from every output.
@@ -32,6 +32,7 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 | MCP config (stdio) / remote + official MCP example | `mcp.json`, `mcp.remote.example.json` |
 | Skills (13), known-issues reference | `skills/`, `references/` |
 | mcloud CLI installer (persistent, self-restoring) | `scripts/setup-mcloud.sh` |
+| Observability dashboard (HTML + optional localhost serve) | `scripts/dashboard.mjs` |
 | Manifests | `.cursor-plugin/plugin.json`, `plugin.json` |
 | Lessons, changelog | `docs/LESSONS.md`, `CHANGELOG.md` |
 | Tests (mock Medusa + docs, smoke, skills lint, privacy scan) | `test/` |
@@ -40,6 +41,7 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 | Tool | Kind | Endpoint (official v2) |
 |---|---|---|
 | `store_health` | read | `GET /health`, `GET /admin/products?limit=1`, `GET /store/products?limit=1` |
+| `observability_dashboard` | read | live health/admin/store + `GET /admin/api-keys?type=publishable`, plus in-memory latency/error recorder; optional HTML |
 | `list_products`, `get_product` | read | `GET /admin/products`, `GET /admin/products/{id}` |
 | `list_variants` | read | `GET /admin/products/{id}/variants` |
 | `inventory_levels` | read | `GET /admin/inventory-items` (`*location_levels`) |
@@ -100,6 +102,21 @@ mcloud login                      # YOU do this (browser), or set MCLOUD_TOKEN f
 ```
 The two official remote MCPs, the Docs MCP (`https://docs.medusajs.com/mcp`) and the read-only Cloud MCP (`https://cloud.medusajs.com/mcp`), are optional connectors you add with OAuth. See `mcp.remote.example.json` and `skills/medusa-cloud-cli`.
 
+
+## Observability dashboard
+Read-only live checks plus an in-memory latency/error recorder (ring buffer, last ~200 HTTP calls). Keys and auth headers are never recorded.
+
+**MCP tool:** ask Grok Bot to run `observability_dashboard`. It returns JSON (surfaces up/down, latest/avg/p95 ms, publishable key table, recent errors with exact messages) and a markdown summary. Pass `format: "html"` to include a self-contained dark-theme HTML document, or `write_html: "/path/to/file.html"` to write it to disk.
+
+**CLI script:**
+```
+node scripts/dashboard.mjs                         # writes ./medusa-dashboard.html
+node scripts/dashboard.mjs --out /tmp/dash.html     # custom path
+node scripts/dashboard.mjs --serve                  # http://127.0.0.1:8790/ (localhost only), refresh every 30s
+node scripts/dashboard.mjs --serve --port 8790 --refresh 30
+```
+Requires the same env as the MCP server (`MEDUSA_BACKEND_URL`, `MEDUSA_ADMIN_API_KEY`, optional `MEDUSA_PUBLISHABLE_KEY`). Publishable keys with no sales channel are flagged `NO SALES CHANNEL` (WARN).
+
 ## Install
 1. Install **Medusa Commerce** from the Grok Bot marketplace (or point a connector at a local checkout).
 2. Set `MEDUSA_BACKEND_URL` and `MEDUSA_ADMIN_API_KEY` (a secret key from Medusa Admin > Settings > Secret API Keys). Optionally set `MEDUSA_PUBLISHABLE_KEY`, and `MEDUSA_ALLOW_PUBLISH=true` only if you want the bot to publish and edit live data.
@@ -109,7 +126,7 @@ Optional env: `MEDUSA_TIMEOUT_MS` (default 15000), `MEDUSA_DOCS_BASE`, `MEDUSA_D
 
 ## Develop / test
 ```
-node test/smoke.mjs          # starts the bundled mock on 127.0.0.1:19000 (+ docs :19050); 52 end-to-end checks (incl. opt-in publish gates)
+node test/smoke.mjs          # starts the bundled mock on 127.0.0.1:19000 (+ docs :19050); end-to-end checks (incl. opt-in publish gates + observability)
 node test/skills.test.mjs    # step-0 Golden Rule in every skill; every lesson cites docs.medusajs.com or UNVERIFIED
 node test/privacy-scan.mjs   # no IPs, emails, live keys, store domains, tokens (optional PRIVACY_DENYLIST file)
 ```

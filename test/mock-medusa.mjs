@@ -16,6 +16,12 @@ const db = {
   orders: [{ id: "order_1", display_id: 1, status: "pending", payment_status: "captured", fulfillment_status: "not_fulfilled", total: 20, currency_code: "usd", created_at: "2026-10-01T00:00:00Z", email: "buyer@example.com", shipping_address: { city: "Example" }, items: [], fulfillments: [] }],
   categories: [{ id: "pcat_1", name: "Apparel", handle: "apparel", is_active: true, is_internal: false, parent_category_id: null }],
   tags: [{ id: "ptag_1", value: "new" }], channels: [{ id: "sc_1", name: "Default Sales Channel", is_disabled: false }],
+  api_keys: [
+    { id: "apk_1", title: "Storefront Key", type: "publishable", redacted: "pk_test_••••abcd", revoked_at: null, sales_channels: [{ id: "sc_1", name: "Default Sales Channel" }] },
+    { id: "apk_2", title: "Orphan Key", type: "publishable", redacted: "pk_test_••••orph", revoked_at: null, sales_channels: [] },
+    { id: "apk_3", title: "Revoked Key", type: "publishable", redacted: "pk_test_••••rev", revoked_at: "2026-01-01T00:00:00Z", sales_channels: [] },
+    { id: "apk_sec", title: "Secret", type: "secret", redacted: "sk_test_••••sec", revoked_at: null, sales_channels: [] },
+  ],
 };
 const pick = (o, fields) => { if (!fields) return o; const keep = fields.split(",").filter((f) => !f.startsWith("*") && !f.includes(".")).concat(fields.split(",").filter((f) => f.startsWith("*")).map((f) => f.slice(1).split(".")[0])).concat(fields.split(",").filter((f) => f.includes(".") && !f.startsWith("*")).map((f) => f.split(".")[0])); const r = { id: o.id }; for (const k of keep) if (k in o) r[k] = o[k]; return r; };
 const send = (res, s, b) => res.writeHead(s, { "Content-Type": "application/json" }).end(JSON.stringify(b));
@@ -25,6 +31,7 @@ http.createServer(async (req, res) => {
   if (p === "/health") return res.writeHead(200).end("OK");
   if (p.startsWith("/store/")) {
     if (req.headers["x-publishable-api-key"] !== PK) return send(res, 400, { type: "not_allowed", message: "Publishable API key required in the request header: x-publishable-api-key." });
+    if (p === "/store/_obs_error") return send(res, 503, { type: "unexpected_state", message: "OBS_STORE_ERROR_VERBATIM: simulated store failure" });
     const vis = db.products.filter((x) => x.status === "published" && x.sales_channels.some((s) => s.id === "sc_1"));
     return send(res, 200, { products: vis.map((x) => pick(x, f)), count: vis.length, offset: 0, limit: 20 });
   }
@@ -45,6 +52,12 @@ http.createServer(async (req, res) => {
   if (p === "/admin/product-categories") return list("product_categories", db.categories);
   if (p === "/admin/product-tags") return list("product_tags", db.tags);
   if (p === "/admin/sales-channels") return list("sales_channels", db.channels);
+  if (p === "/admin/api-keys") {
+    const type = u.searchParams.get("type");
+    let arr = db.api_keys;
+    if (type) arr = arr.filter((k) => k.type === type);
+    return list("api_keys", arr);
+  }
   return send(res, 404, { message: "not found" });
 }).listen(PORT, "127.0.0.1", () => console.error(`mock medusa on 127.0.0.1:${PORT}`));
 // A backend that resets every connection (simulates blocked egress / TLS reset).

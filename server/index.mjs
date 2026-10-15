@@ -5,8 +5,10 @@
 // products are only ever created/kept as DRAFT (never auto-publish), fail loud, never echo secrets.
 import http from "node:http";
 import readline from "node:readline";
+import fs from "node:fs";
+import path from "node:path";
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const env = process.env;
 const BASE = (env.MEDUSA_BACKEND_URL || "").replace(/\/+$/, "");
 const ADMIN_KEY = env.MEDUSA_ADMIN_API_KEY || "";
@@ -26,6 +28,7 @@ const DOC = {
   categories: `${API}#product-categories`, tags: `${API}#product-tags`,
   sales_channels: `${API}#sales-channels`, store_products: "https://docs.medusajs.com/api/store#products",
   publishable: "https://docs.medusajs.com/api/store#publishable-api-key",
+  api_keys: `${API}#api-keys`,
 };
 
 function need() {
@@ -37,6 +40,48 @@ function needAdmin() {
 }
 const scrub = (s) => { let t = String(s); for (const k of [ADMIN_KEY, PUB_KEY]) if (k) t = t.split(k).join("[REDACTED]"); return t; };
 
+const RING_MAX = 200;
+const obsRing = [];
+function obsSurface(p, { store = false, docs = false } = {}) {
+  if (docs) return "docs";
+  const pathOnly = String(p).split("?")[0];
+  if (pathOnly === "/health" || pathOnly.startsWith("/health/")) return "health";
+  if (store || pathOnly.startsWith("/store")) return "store";
+  if (pathOnly.startsWith("/admin")) return "admin";
+  return "admin";
+}
+function obsSafePath(p) {
+  const s = String(p);
+  const q = s.indexOf("?");
+  if (q < 0) return s;
+  const pathname = s.slice(0, q);
+  const params = new URLSearchParams(s.slice(q + 1));
+  const out = new URLSearchParams();
+  for (const [k, v] of params) {
+    if (/key|token|secret|password|authorization|auth/i.test(k)) continue;
+    let val = String(v);
+    for (const secret of [ADMIN_KEY, PUB_KEY]) if (secret && val.includes(secret)) val = "[REDACTED]";
+    out.set(k, val);
+  }
+  const qs = out.toString();
+  return qs ? `${pathname}?${qs}` : pathname;
+}
+function obsRecord({ surface, path: p, status, ms, error }) {
+  obsRing.push({ surface, path: obsSafePath(p), status: status ?? 0, ms: Math.round(ms), timestamp: new Date().toISOString(), ...(error ? { error: scrub(String(error)) } : {}) });
+  while (obsRing.length > RING_MAX) obsRing.shift();
+}
+function obsStats(surface) {
+  const rows = obsRing.filter((r) => !surface || r.surface === surface);
+  const ms = rows.map((r) => r.ms).filter((n) => typeof n === "number").sort((a, b) => a - b);
+  const latest = rows.length ? rows[rows.length - 1].ms : null;
+  const avg = ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : null;
+  const p95 = ms.length ? ms[Math.min(ms.length - 1, Math.ceil(ms.length * 0.95) - 1)] : null;
+  return { samples: rows.length, latest_ms: latest, avg_ms: avg, p95_ms: p95 };
+}
+function obsRecentErrors(limit = 20) {
+  return obsRing.filter((r) => r.error).slice(-limit).reverse();
+}
+
 async function req(path, { method = "GET", body, admin = true, store = false, raw = false } = {}) {
   need();
   const headers = { Accept: "application/json" };
@@ -45,23 +90,44 @@ async function req(path, { method = "GET", body, admin = true, store = false, ra
   if (store) { if (!PUB_KEY) throw new Error("MEDUSA_PUBLISHABLE_KEY is not set; /store routes need the x-publishable-api-key header. See " + DOC.publishable); headers["x-publishable-api-key"] = PUB_KEY; }
   if (body) headers["Content-Type"] = "application/json";
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TIMEOUT); const t0 = performance.now();
+  const surface = obsSurface(path, { store });
+  let status = 0;
   try {
     const res = await fetch(`${BASE}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: ac.signal });
+    status = res.status;
     const text = await res.text(); let data; try { data = JSON.parse(text); } catch { data = text.slice(0, 500); }
-    const out = { status: res.status, ok: res.ok, data, latency_ms: Math.round(performance.now() - t0) };
-    if (raw) return out;
+    const ms = performance.now() - t0;
+    const out = { status: res.status, ok: res.ok, data, latency_ms: Math.round(ms) };
+    if (raw) {
+      if (!res.ok) {
+        const msg = typeof data === "string" ? data : data?.message || JSON.stringify(data).slice(0, 300);
+        obsRecord({ surface, path, status, ms, error: scrub(`${method} ${path} -> HTTP ${status}: ${msg}`) });
+      } else obsRecord({ surface, path, status, ms });
+      return out;
+    }
     if (!res.ok) {
       const hint = res.status === 401 ? " (401: wrong, revoked, or wrong-type key; admin routes need a SECRET key, store routes a PUBLISHABLE key)" : res.status === 404 ? " (404: wrong id or route)" : "";
-      throw new Error(scrub(`${method} ${path} -> HTTP ${res.status}${hint}: ${typeof data === "string" ? data : data?.message || JSON.stringify(data).slice(0, 300)}`));
+      const msg = scrub(`${method} ${path} -> HTTP ${res.status}${hint}: ${typeof data === "string" ? data : data?.message || JSON.stringify(data).slice(0, 300)}`);
+      obsRecord({ surface, path, status, ms, error: msg });
+      throw new Error(msg);
     }
+    obsRecord({ surface, path, status, ms });
     return data;
   } catch (e) {
-    if (e.name === "AbortError") throw new Error(`${method} ${path} -> timeout after ${TIMEOUT}ms`);
+    const ms = performance.now() - t0;
+    if (e.name === "AbortError") {
+      const msg = `${method} ${path} -> timeout after ${TIMEOUT}ms`;
+      obsRecord({ surface, path, status: status || 0, ms, error: msg });
+      throw new Error(msg);
+    }
     if (e.message?.includes("HTTP")) throw e;
     const code = e.cause?.code || e.message; const nh = /ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|CERT|SSL|TLS|socket/i.test(code) ? " (network: backend down, wrong MEDUSA_BACKEND_URL, or this machine's egress/TLS to the backend is blocked; try `curl <url>/health` from the same machine)" : "";
-    throw new Error(scrub(`${method} ${path} -> ${code}${nh}`));
+    const msg = scrub(`${method} ${path} -> ${code}${nh}`);
+    obsRecord({ surface, path, status: status || 0, ms, error: msg });
+    throw new Error(msg);
   } finally { clearTimeout(t); }
 }
+
 const qs = (o) => { const p = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") p.set(k, String(v)); const s = p.toString(); return s ? `?${s}` : ""; };
 const lim = (n, d = 20) => Math.min(Math.max(Number(n) || d, 1), 100);
 const dry = (action, request, extra = {}) => ({ dry_run: true, action, request, ...extra, next: "Review, then call again with confirm=true to execute." });
@@ -227,7 +293,24 @@ async function liveProductUpdate({ id, patch, confirm }) {
 
 // ---- golden rule: official docs first ----
 let indexCache = null;
-async function fetchText(url) { const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TIMEOUT); try { const r = await fetch(url, { signal: ac.signal, headers: { Accept: "text/markdown, text/plain" } }); if (!r.ok) throw new Error(`HTTP ${r.status}`); return await r.text(); } finally { clearTimeout(t); } }
+async function fetchText(url) {
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TIMEOUT); const t0 = performance.now();
+  let pathLabel = url; try { pathLabel = new URL(url).pathname + (new URL(url).search || ""); } catch { /* keep */ }
+  try {
+    const r = await fetch(url, { signal: ac.signal, headers: { Accept: "text/markdown, text/plain" } });
+    const ms = performance.now() - t0;
+    if (!r.ok) {
+      const msg = `HTTP ${r.status}`;
+      obsRecord({ surface: "docs", path: pathLabel, status: r.status, ms, error: msg });
+      throw new Error(msg);
+    }
+    obsRecord({ surface: "docs", path: pathLabel, status: r.status, ms });
+    return await r.text();
+  } catch (e) {
+    if (!String(e.message || "").startsWith("HTTP")) obsRecord({ surface: "docs", path: pathLabel, status: 0, ms: performance.now() - t0, error: scrub(e.message || String(e)) });
+    throw e;
+  } finally { clearTimeout(t); }
+}
 async function medusaDocs({ query, page }) {
   const origin = new URL(DOCS_BASE).origin;
   if (page) {
@@ -244,6 +327,148 @@ async function medusaDocs({ query, page }) {
   const scored = indexCache.split("\n").map((l) => [l, words.filter((w) => l.toLowerCase().includes(w)).length]).filter(([, s]) => s > 0).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([l]) => l.trim());
   return { index: DOCS_INDEX, matches: scored, verdict: scored.length ? "FOUND: open the best page with medusa_docs {page}" : "NOT IN OFFICIAL DOCS (no index match). Say so and mark any step UNVERIFIED.",
     tip: "Medusa also hosts official remote MCPs (OAuth, Medusa Cloud account): Docs MCP https://docs.medusajs.com/mcp and read-only Cloud store MCP https://cloud.medusajs.com/mcp." };
+}
+
+
+function escHtml(s) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function buildObsMarkdown(report) {
+  const lines = ["# Medusa observability dashboard", "", `Generated: ${report.generated_at}`, ""];
+  lines.push("## Surfaces");
+  for (const name of ["health", "admin", "store", "docs"]) {
+    const s = report.surfaces[name] || {};
+    const up = s.up === true ? "UP" : s.up === false ? "DOWN" : "n/a";
+    const lat = [];
+    if (s.latency_ms != null) lat.push(`live ${s.latency_ms}ms`);
+    if (s.latest_ms != null) lat.push(`latest ${s.latest_ms}ms`);
+    if (s.avg_ms != null) lat.push(`avg ${s.avg_ms}ms`);
+    if (s.p95_ms != null) lat.push(`p95 ${s.p95_ms}ms`);
+    lines.push(`- **${name}**: ${up}${s.http_status != null ? ` (HTTP ${s.http_status})` : ""}${lat.length ? " — " + lat.join(", ") : ""}${s.error ? ` — ERROR: ${s.error}` : ""}`);
+  }
+  lines.push("", "## Publishable API keys");
+  if (!(report.publishable_keys || []).length) lines.push("_none returned_");
+  else {
+    lines.push("| title | redacted | revoked | sales channels | status |");
+    lines.push("|---|---|---|---|---|");
+    for (const k of report.publishable_keys) {
+      const ch = (k.sales_channels || []).length ? k.sales_channels.join(", ") : "—";
+      const st = k.warning || (k.revoked ? "revoked" : "ok");
+      lines.push(`| ${k.title || "—"} | ${k.redacted || "—"} | ${k.revoked ? "yes" : "no"} | ${ch} | ${st} |`);
+    }
+  }
+  lines.push("", "## Recent errors");
+  if (!(report.recent_errors || []).length) lines.push("_none in recorder_");
+  else for (const e of report.recent_errors) lines.push(`- \`${e.timestamp}\` [${e.surface}] ${e.path} HTTP ${e.status} (${e.ms}ms): ${e.error}`);
+  lines.push("", `_recorder ${report.recorder?.size || 0}/${report.recorder?.max || RING_MAX}_`);
+  return lines.join("\n");
+}
+function buildObsHtml(report) {
+  const row = (name, s) => {
+    const up = s.up === true ? "up" : s.up === false ? "down" : "na";
+    const label = s.up === true ? "UP" : s.up === false ? "DOWN" : "n/a";
+    return `<tr><td>${escHtml(name)}</td><td class="${up}">${label}</td><td>${s.http_status ?? "—"}</td><td>${s.latency_ms ?? "—"}</td><td>${s.latest_ms ?? "—"}</td><td>${s.avg_ms ?? "—"}</td><td>${s.p95_ms ?? "—"}</td><td class="err">${escHtml(s.error || "")}</td></tr>`;
+  };
+  const keyRows = (report.publishable_keys || []).map((k) => {
+    const warn = k.warning ? `<span class="warn">${escHtml(k.warning)}</span>` : (k.revoked ? "revoked" : "ok");
+    const ch = (k.sales_channels || []).length ? escHtml(k.sales_channels.join(", ")) : "—";
+    return `<tr><td>${escHtml(k.title || "—")}</td><td><code>${escHtml(k.redacted || "—")}</code></td><td>${k.revoked ? "yes" : "no"}</td><td>${ch}</td><td>${warn}</td></tr>`;
+  }).join("") || `<tr><td colspan="5">none returned</td></tr>`;
+  const errRows = (report.recent_errors || []).map((e) =>
+    `<tr><td>${escHtml(e.timestamp)}</td><td>${escHtml(e.surface)}</td><td><code>${escHtml(e.path)}</code></td><td>${e.status}</td><td>${e.ms}</td><td class="err">${escHtml(e.error)}</td></tr>`
+  ).join("") || `<tr><td colspan="6">none in recorder</td></tr>`;
+  const surfRows = ["health", "admin", "store", "docs"].map((n) => row(n, report.surfaces[n] || {})).join("");
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Medusa observability dashboard</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,sans-serif;background:#0b0f14;color:#e6edf3}
+header{padding:20px 24px;border-bottom:1px solid #243041;background:#111822}
+h1{margin:0 0 4px;font-size:20px}
+.meta{color:#8b9bb4}
+main{padding:24px;display:grid;gap:24px}
+section{background:#121a24;border:1px solid #243041;border-radius:12px;padding:16px 18px}
+h2{margin:0 0 12px;font-size:15px;color:#9ecbff}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #1e2a3a;vertical-align:top}
+th{color:#8b9bb4;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.up{color:#3dd68c;font-weight:700}.down{color:#ff6b6b;font-weight:700}.na{color:#8b9bb4}
+.warn{color:#ffd166;font-weight:700}.err{color:#ff8e8e;white-space:pre-wrap;word-break:break-word}
+code{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c6d0db}
+footer{padding:0 24px 24px;color:#8b9bb4;font-size:12px}
+</style></head><body>
+<header><h1>Medusa observability dashboard</h1><div class="meta">Generated ${escHtml(report.generated_at)} · recorder ${report.recorder?.size || 0}/${report.recorder?.max || RING_MAX} · read-only</div></header>
+<main>
+<section><h2>Surfaces</h2><table><thead><tr><th>Surface</th><th>Status</th><th>HTTP</th><th>Live ms</th><th>Latest</th><th>Avg</th><th>p95</th><th>Error</th></tr></thead><tbody>${surfRows}</tbody></table></section>
+<section><h2>Publishable API keys</h2><table><thead><tr><th>Title</th><th>Redacted</th><th>Revoked</th><th>Sales channels</th><th>Status</th></tr></thead><tbody>${keyRows}</tbody></table></section>
+<section><h2>Recent errors</h2><table><thead><tr><th>When</th><th>Surface</th><th>Path</th><th>HTTP</th><th>ms</th><th>Message</th></tr></thead><tbody>${errRows}</tbody></table></section>
+</main>
+<footer>In-plugin read-only dashboard. Keys and auth headers are never recorded.</footer>
+</body></html>`;
+}
+async function observabilityDashboard({ format, write_html } = {}) {
+  const generated_at = new Date().toISOString();
+  const surfaces = {};
+  // Live checks (read-only GETs)
+  if (!BASE) {
+    surfaces.health = { up: false, error: "MEDUSA_BACKEND_URL is not set", ...obsStats("health") };
+    surfaces.admin = { up: false, error: "MEDUSA_BACKEND_URL is not set", ...obsStats("admin") };
+    surfaces.store = { up: false, error: "MEDUSA_BACKEND_URL is not set", ...obsStats("store") };
+  } else {
+    const h = await req("/health", { admin: false, raw: true }).catch((e) => ({ ok: false, error: e.message, status: 0 }));
+    surfaces.health = { up: !!h.ok, http_status: h.status, latency_ms: h.latency_ms, ...(h.error ? { error: h.error } : {}), ...obsStats("health") };
+    if (ADMIN_KEY) {
+      const a = await req("/admin/products?limit=1&fields=id", { raw: true }).catch((e) => ({ ok: false, error: e.message, status: 0 }));
+      surfaces.admin = { up: !!a.ok, http_status: a.status, latency_ms: a.latency_ms, ...(a.ok ? {} : { error: a.error || `HTTP ${a.status}` }), ...obsStats("admin") };
+    } else surfaces.admin = { up: false, error: "MEDUSA_ADMIN_API_KEY not set", ...obsStats("admin") };
+    if (PUB_KEY) {
+      const s = await req("/store/products?limit=1&fields=id", { admin: false, store: true, raw: true }).catch((e) => ({ ok: false, error: e.message, status: 0 }));
+      surfaces.store = { up: !!s.ok, http_status: s.status, latency_ms: s.latency_ms, ...(s.ok ? {} : { error: s.error || `HTTP ${s.status}` }), ...obsStats("store") };
+    } else surfaces.store = { up: false, error: "MEDUSA_PUBLISHABLE_KEY not set", ...obsStats("store") };
+  }
+  surfaces.docs = { up: obsRing.some((r) => r.surface === "docs" && !r.error) || null, ...obsStats("docs") };
+  if (surfaces.docs.samples === 0) { surfaces.docs.up = null; }
+
+  const publishable_keys = [];
+  if (BASE && ADMIN_KEY) {
+    const kr = await req("/admin/api-keys?type=publishable&fields=id,title,redacted,revoked_at,*sales_channels", { raw: true }).catch((e) => ({ ok: false, error: e.message, data: null }));
+    if (kr.ok) {
+      for (const k of kr.data?.api_keys || []) {
+        const names = (k.sales_channels || []).map((c) => c.name || c.id).filter(Boolean);
+        const revoked = !!k.revoked_at;
+        const warning = !revoked && names.length === 0 ? "NO SALES CHANNEL" : null;
+        publishable_keys.push({ title: k.title, redacted: k.redacted || null, revoked, sales_channels: names, ...(warning ? { warning } : {}) });
+      }
+    } else {
+      publishable_keys.push({ title: "(list failed)", redacted: null, revoked: false, sales_channels: [], warning: scrub(kr.error || "api-keys request failed") });
+    }
+  }
+
+  const report = {
+    generated_at,
+    surfaces,
+    publishable_keys,
+    recent_errors: obsRecentErrors(20),
+    recorder: { size: obsRing.length, max: RING_MAX },
+    doc: DOC.api_keys,
+  };
+  const markdown = buildObsMarkdown(report);
+  const out = { ...report, markdown };
+  const wantHtml = format === "html" || !!write_html;
+  if (wantHtml) {
+    const html = buildObsHtml(report);
+    if (write_html) {
+      const dest = path.resolve(String(write_html));
+      fs.writeFileSync(dest, html, "utf8");
+      out.html_path = dest;
+      out.html_bytes = Buffer.byteLength(html);
+    } else {
+      out.html = html;
+    }
+  }
+  return out;
 }
 
 const S = (props = {}, required = []) => ({ type: "object", properties: props, ...(required.length ? { required } : {}) });
@@ -266,6 +491,7 @@ const tools = {
   inventory_level_update: { description: "Set stocked_quantity for an existing inventory level at a stock location. Dry-run (shows before) unless confirm=true; confirm also needs MEDUSA_ALLOW_PUBLISH=true (stock is always live).", inputSchema: S({ inventory_item_id: str, location_id: str, stocked_quantity: num, confirm: conf }, ["inventory_item_id", "location_id", "stocked_quantity"]), run: inventoryLevelUpdate },
   product_publish: { description: "OPT-IN: publish one product (draft -> published). Requires MEDUSA_ALLOW_PUBLISH=true AND confirm=true. Pre-checks: sales channel, prices, non-zero stock (unless allow_zero_stock). Dry-run lists blockers; confirm reads back. One product per call: no bulk publish.", inputSchema: S({ id: str, allow_zero_stock: bool, confirm: conf }, ["id"]), run: productPublish },
   live_product_update: { description: "OPT-IN: edit any product including live ones (no status changes; use product_publish). Requires MEDUSA_ALLOW_PUBLISH=true AND confirm=true. Dry-run shows current values.", inputSchema: S({ id: str, patch: { type: "object" }, confirm: conf }, ["id", "patch"]), run: liveProductUpdate },
+  observability_dashboard: { description: "Read-only observability dashboard: live /health, admin auth, store (publishable key), publishable API key table (title, redacted token, revoked, sales channels; WARN when no channel), plus in-memory latency/error recorder stats (latest/avg/p95) and recent errors with exact messages. Optional format=\"html\" or write_html=path for a self-contained dark-theme HTML file. Never records keys/headers.", inputSchema: S({ format: str, write_html: str }), run: observabilityDashboard },
   medusa_docs: { description: "Golden Rule: search the official Medusa docs index (query) or read/grep an official docs page (page, optional query). Reports 'NOT IN OFFICIAL DOCS' when nothing matches. Call before any write or unfamiliar answer.", inputSchema: S({ query: str, page: str }), run: medusaDocs },
 };
 
