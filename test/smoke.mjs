@@ -5,7 +5,7 @@ import path from "node:path";
 const root = new URL("..", import.meta.url).pathname;
 const mock = spawn("node", [path.join(root, "test/mock-medusa.mjs")], { stdio: ["ignore", "ignore", "pipe"] });
 await new Promise((r) => { let n = 0; mock.stderr.on("data", (d) => { n += (String(d).match(/mock /g) || []).length; if (n >= 3) r(); }); });
-const BASE_ENV = { MEDUSA_BACKEND_URL: "http://127.0.0.1:19000", MEDUSA_ADMIN_API_KEY: "sk_test_mock", MEDUSA_PUBLISHABLE_KEY: "pk_test_mock", MEDUSA_DOCS_BASE: "http://127.0.0.1:19050/", MEDUSA_TIMEOUT_MS: "3000" };
+const BASE_ENV = { MEDUSA_BACKEND_URL: "http://127.0.0.1:19000", MEDUSA_ADMIN_API_KEY: "sk_test_mock", MEDUSA_PUBLISHABLE_KEY: "pk_test_mock", MEDUSA_DOCS_BASE: "http://127.0.0.1:19050/", MEDUSA_TIMEOUT_MS: "3000", MEDUSA_AUDIT_LOG: "/tmp/medusa-audit-smoke-main.jsonl" };
 function start(extra = {}) {
   const e = { ...process.env, ...BASE_ENV, ...extra }; for (const k of Object.keys(e)) if (e[k] === null) delete e[k];
   const srv = spawn("node", [path.join(root, "server/index.mjs")], { env: e, stdio: ["pipe", "pipe", "inherit"] });
@@ -17,8 +17,8 @@ function start(extra = {}) {
 }
 const results = []; const check = (name, cond) => results.push([name, !!cond]); const outs = [];
 const A = start();
-const init = await A.rpc("initialize", { protocolVersion: "2025-06-18" }); check("server reports v1.3.0", init.result.serverInfo.version === "1.3.0");
-const names = (await A.rpc("tools/list", {})).result.tools.map((t) => t.name); console.log("tools:", names.join(", ")); check("19 tools listed", names.length === 19 && names.includes("observability_dashboard"));
+const init = await A.rpc("initialize", { protocolVersion: "2025-06-18" }); check("server reports v1.4.0", init.result.serverInfo.version === "1.4.0");
+const names = (await A.rpc("tools/list", {})).result.tools.map((t) => t.name); console.log("tools:", names.join(", ")); check("23 tools listed", names.length === 23 && names.includes("observability_dashboard") && names.includes("events_poll_since") && names.includes("audit_log") && names.includes("remediation_status") && names.includes("rate_limit_status"));
 const h = await A.call("store_health"); outs.push(h); check("store_health OK with backend, secret key and publishable key", h.verdict === "OK" && h.checks.length === 3);
 const od = await A.call("observability_dashboard"); outs.push(od);
 check("observability_dashboard surfaces up (health/admin/store)", od.surfaces?.health?.up && od.surfaces?.admin?.up && od.surfaces?.store?.up);
@@ -27,6 +27,9 @@ check("observability_dashboard includes markdown summary", typeof od.markdown ==
 check("observability_dashboard latency stats present", od.surfaces.health.latest_ms != null && od.surfaces.admin.avg_ms != null);
 const odHtml = await A.call("observability_dashboard", { format: "html", write_html: "/tmp/medusa-obs-smoke.html" }, true);
 check("observability_dashboard write_html writes bytes", Number(odHtml.html_bytes) > 500 && String(odHtml.html_path).endsWith("medusa-obs-smoke.html"));
+const rls = await A.call("rate_limit_status", {}, true); check("rate_limit_status reports budget", rls.budget_per_min >= 1 && rls.surfaces?.admin?.count_last_min >= 1);
+const ev0 = await A.call("events_poll_since", { cursor: 0 }, true); check("events_poll_since returns cursor stream", typeof ev0.latest_cursor === "number" && Array.isArray(ev0.events));
+const remOff = await A.call("remediation_status", { run: true }, true); check("remediation does nothing without MEDUSA_ENABLE_REMEDIATION", remOff.enabled === false && (remOff.ran || []).length === 0);
 const lp = await A.call("list_products"); outs.push(lp); check("list_products returns count", lp.count === 4);
 const ld = await A.call("list_products", { status: "draft" }, true); check("list_products filters status=draft", ld.count === 3 && ld.products[0].id === "prod_2");
 const gp = await A.call("get_product", { id: "prod_1" }); check("get_product includes variants + sales channels", gp.product.variants?.length === 1 && gp.product.sales_channels?.length === 1);
@@ -41,6 +44,7 @@ check("list_sales_channels", (await A.call("list_sales_channels", {}, true)).cou
 const sp = await A.call("store_products"); check("store_products sees only published + channel-linked products", sp.count === 1 && sp.products[0].id === "prod_1");
 const draftArgs = { title: "New Cap", handle: "new-cap", images: ["https://cdn.example.com/cap.png"], options: [{ title: "Default", values: ["Default"] }], variants: [{ title: "Default", sku: "CAP-1", options: { Default: "Default" }, prices: [{ amount: 15, currency_code: "usd" }] }], sales_channel_ids: ["sc_1"] };
 const dc = await A.call("draft_product_create", draftArgs); outs.push(dc); check("SAFETY draft_product_create is dry-run by default and forces status=draft", dc.dry_run === true && dc.request.status === "draft" && dc.request.thumbnail === draftArgs.images[0]);
+const al = await A.call("audit_log", { tool: "draft_product_create", limit: 5 }, true); check("audit_log records dry-run writes", (al.entries || []).some((e) => e.tool === "draft_product_create" && e.dry_run === true));
 const noVar = await A.call("draft_product_create", { title: "x", options: [], variants: [] }, true); check("LESSON v2 needs options + variants: fail loud before any write", String(noVar).includes("requires at least one option"));
 const dcl = await A.call("draft_product_create", { ...draftArgs, confirm: true }); check("LESSON images go to DRAFT: confirm creates draft and verifies by read-back", dcl.dry_run === false && dcl.created.status === "draft");
 const noSc = await A.call("draft_product_create", { ...draftArgs, sales_channel_ids: [] }, true); check("LESSON warns when no sales channel (invisible to publishable key)", noSc.warnings.some((w) => w.includes("sales_channel")));
@@ -94,7 +98,19 @@ await F.call("store_products", {}, true);
 const fod = await F.call("observability_dashboard", {}, true); outs.push(fod);
 check("observability: store error message captured verbatim", JSON.stringify(fod.recent_errors || []).includes("Publishable API key required in the request header: x-publishable-api-key."));
 check("observability: no secrets in dashboard output", !JSON.stringify(fod).includes("sk_test_mock") && !JSON.stringify(fod).includes("pk_test_mock") && !JSON.stringify(fod).includes("pk_wrong_not_secret"));
+const fev = await F.call("events_poll_since", { cursor: 0, limit: 50 }, true);
+check("events_poll_since includes captured store error", (fev.events || []).some((e) => e.type === "error" && String(e.error || "").includes("Publishable API key required in the request header: x-publishable-api-key.")));
 F.srv.kill();
+const G = start({ MEDUSA_ENABLE_REMEDIATION: "true", MEDUSA_AUDIT_LOG: "/tmp/medusa-audit-smoke.jsonl" });
+const gRem = await G.call("remediation_status", { run: true }, true);
+check("remediation dry-run with ENABLE only (no APPLY)", gRem.enabled === true && gRem.apply === false && (gRem.ran || []).some((r) => r.hook === "publishable_key_missing_sales_channel" && (r.results || []).some((x) => x.status === "dry_run" || x.key_title === "Orphan Key")));
+check("orphan key still has no channel after dry-run remediation", ((await G.call("observability_dashboard", {}, true)).publishable_keys || []).some((k) => k.title === "Orphan Key" && k.warning === "NO SALES CHANNEL"));
+G.srv.kill();
+const H = start({ MEDUSA_RATE_BUDGET_PER_MIN: "3" });
+await H.call("list_products", {}, true); await H.call("list_tags", {}, true); await H.call("list_categories", {}, true);
+const hList = await H.call("list_sales_channels", {}, true);
+check("throttle hint when near rate budget", hList.throttle?.admin?.near_limit === true);
+H.srv.kill();
 mock.kill();
 console.log("\n" + results.map(([n, ok]) => `${ok ? "PASS" : "FAIL"}  ${n}`).join("\n"));
 const failed = results.filter(([, ok]) => !ok).length;

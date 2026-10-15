@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 (2026-10-15)
+- **Event stream:** in-process bus for plugin-captured errors, health transitions, key warnings, audit and remediation; MCP tool `events_poll_since` (cursor); optional `MEDUSA_EVENTS_WEBHOOK_URL` with HMAC-SHA256 (`X-Medusa-Plugin-Signature`) and retry/backoff; `/events` SSE on MCP HTTP transport and on `scripts/dashboard.mjs --serve`.
+- **Audit trail:** append-only JSONL (`~/.medusa-plugin/audit.jsonl` or `MEDUSA_AUDIT_LOG`) for every write/remediation including dry-runs; tool `audit_log`.
+- **Remediation hooks** (OFF by default): `MEDUSA_ENABLE_REMEDIATION` + optional `MEDUSA_REMEDIATION_APPLY`; allowlist via `MEDUSA_REMEDIATION_ALLOWLIST`; built-in `publishable_key_missing_sales_channel` (POST `/admin/api-keys/{id}/sales-channels` when exactly one channel exists); tool `remediation_status`.
+- **Rate-limit awareness:** rolling per-surface counts, `Retry-After` / `X-RateLimit-*`, backoff on 429/503 with jitter, budget `MEDUSA_RATE_BUDGET_PER_MIN` (default 60), `throttle` hint on tool responses; tool `rate_limit_status`.
+- Skill `medusa-event-forwarding` (docs-first): real Medusa store events need a backend subscriber; gaps marked not in official docs.
+- Smoke coverage for events, audit dry-run, remediation off/dry-run, throttle hint. No live remediation against real stores.
+
+
 ## 1.3.0 (2026-10-15)
 - Read-only **observability dashboard**: in-memory error/latency ring buffer (last ~200 calls) on the HTTP helper; surfaces `health` / `admin` / `store` / `docs`; never records keys or headers.
 - New MCP tool `observability_dashboard`: live `/health`, admin auth, store check, publishable API key table (title, redacted token, revoked, sales channels; `NO SALES CHANNEL` WARN), latency latest/avg/p95, recent errors with exact messages; markdown summary; optional `format: "html"` or `write_html` for a self-contained dark-theme HTML file.

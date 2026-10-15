@@ -2,7 +2,7 @@
 import fs from "node:fs"; import path from "node:path";
 const root = new URL("..", import.meta.url).pathname; let fail = 0;
 const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}  ${m}`); if (!c) fail++; };
-const required = ["getting-started", "golden-rule-read-docs-first", "draft-product-pipeline", "catalog-hygiene", "inventory-sync-tips", "compound-learnings", "live-publishing-opt-in", "medusa-cloud-cli", "medusa-cloud-environments", "medusa-erp-inventory-sync", "medusa-admin-orphan-links", "medusa-cart-taxes", "medusa-multi-entity-architecture"];
+const required = ["getting-started", "golden-rule-read-docs-first", "draft-product-pipeline", "catalog-hygiene", "inventory-sync-tips", "compound-learnings", "live-publishing-opt-in", "medusa-cloud-cli", "medusa-cloud-environments", "medusa-erp-inventory-sync", "medusa-admin-orphan-links", "medusa-cart-taxes", "medusa-multi-entity-architecture", "medusa-event-forwarding"];
 ok(fs.existsSync(path.join(root, "references/known-issues.md")), "references/known-issues.md present");
 ok(/never executes SQL/i.test(fs.readFileSync(path.join(root, "skills/medusa-admin-orphan-links/SKILL.md"), "utf8")), "orphan-links skill forbids executing SQL");
 const dirs = fs.readdirSync(path.join(root, "skills"));

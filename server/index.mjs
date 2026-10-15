@@ -7,14 +7,24 @@ import http from "node:http";
 import readline from "node:readline";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const env = process.env;
 const BASE = (env.MEDUSA_BACKEND_URL || "").replace(/\/+$/, "");
 const ADMIN_KEY = env.MEDUSA_ADMIN_API_KEY || "";
 const PUB_KEY = env.MEDUSA_PUBLISHABLE_KEY || "";
 const ALLOW_PUBLISH = /^(1|true|yes)$/i.test(env.MEDUSA_ALLOW_PUBLISH || "");
 const TIMEOUT = Number(env.MEDUSA_TIMEOUT_MS || 15000);
+const EVENTS_WEBHOOK_URL = env.MEDUSA_EVENTS_WEBHOOK_URL || "";
+const EVENTS_WEBHOOK_SECRET = env.MEDUSA_EVENTS_WEBHOOK_SECRET || "";
+const AUDIT_LOG_PATH = env.MEDUSA_AUDIT_LOG || path.join(os.homedir(), ".medusa-plugin", "audit.jsonl");
+const ENABLE_REMEDIATION = /^(1|true|yes)$/i.test(env.MEDUSA_ENABLE_REMEDIATION || "");
+const APPLY_REMEDIATION = /^(1|true|yes)$/i.test(env.MEDUSA_REMEDIATION_APPLY || "");
+const REMEDIATION_ALLOWLIST = (env.MEDUSA_REMEDIATION_ALLOWLIST || "publishable_key_missing_sales_channel").split(",").map((s) => s.trim()).filter(Boolean);
+const RATE_BUDGET_PER_MIN = Math.max(1, Number(env.MEDUSA_RATE_BUDGET_PER_MIN || 60));
+const AUDIT_ACTOR = env.MEDUSA_AUDIT_ACTOR || "mcp";
 const DOCS_BASE = (env.MEDUSA_DOCS_BASE || "https://docs.medusajs.com/").replace(/\/?$/, "/");
 const DOCS_INDEX = env.MEDUSA_DOCS_INDEX || `${DOCS_BASE}llms.txt`;
 
@@ -82,26 +92,257 @@ function obsRecentErrors(limit = 20) {
   return obsRing.filter((r) => r.error).slice(-limit).reverse();
 }
 
-async function req(path, { method = "GET", body, admin = true, store = false, raw = false } = {}) {
+// ---- event stream (in-process) ----
+const EVENT_MAX = 1000;
+let eventSeq = 0;
+const eventLog = [];
+const sseClients = new Set();
+const healthPrev = { health: null, admin: null, store: null };
+function emitEvent(type, data = {}) {
+  const ev = { id: ++eventSeq, type, timestamp: new Date().toISOString(), ...data };
+  eventLog.push(ev);
+  while (eventLog.length > EVENT_MAX) eventLog.shift();
+  const line = `data: ${JSON.stringify(ev)}\n\n`;
+  for (const res of sseClients) { try { res.write(line); } catch { sseClients.delete(res); } }
+  if (EVENTS_WEBHOOK_URL) queueMicrotask(() => deliverWebhook(ev).catch((e) => {
+    const fail = { id: ++eventSeq, type: "webhook_delivery_failed", timestamp: new Date().toISOString(), error: scrub(e.message || String(e)), event_id: ev.id };
+    eventLog.push(fail);
+    while (eventLog.length > EVENT_MAX) eventLog.shift();
+  }));
+  return ev;
+}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+async function deliverWebhook(ev) {
+  if (!EVENTS_WEBHOOK_URL) return;
+  const body = JSON.stringify(ev);
+  const headers = { "Content-Type": "application/json", "User-Agent": `medusa-commerce-plugin/${VERSION}` };
+  if (EVENTS_WEBHOOK_SECRET) headers["X-Medusa-Plugin-Signature"] = crypto.createHmac("sha256", EVENTS_WEBHOOK_SECRET).update(body).digest("hex");
+  let lastErr = "unknown";
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 8000);
+      const res = await fetch(EVENTS_WEBHOOK_URL, { method: "POST", headers, body, signal: ac.signal });
+      clearTimeout(t);
+      if (res.ok) return { ok: true, status: res.status, attempts: attempt + 1 };
+      lastErr = `HTTP ${res.status}`;
+    } catch (e) { lastErr = e.name === "AbortError" ? "timeout" : (e.message || String(e)); }
+    await sleep(100 * (2 ** attempt) + Math.floor(Math.random() * 75));
+  }
+  throw new Error(`webhook delivery failed after retries: ${lastErr}`);
+}
+async function eventsPollSince({ cursor, limit } = {}) {
+  const since = Math.max(0, Number(cursor) || 0);
+  const n = lim(limit, 50);
+  const batch = eventLog.filter((e) => e.id > since).slice(0, n);
+  return { cursor: batch.length ? batch[batch.length - 1].id : since, latest_cursor: eventSeq, count: batch.length, events: batch, webhook_configured: !!EVENTS_WEBHOOK_URL };
+}
+function noteHealthTransition(surface, up, detail = {}) {
+  if (!["health", "admin", "store"].includes(surface)) return;
+  const prev = healthPrev[surface];
+  healthPrev[surface] = up;
+  if (prev !== null && prev !== up) emitEvent("health_transition", { surface, from: prev ? "up" : "down", to: up ? "up" : "down", ...detail });
+}
+
+// ---- audit trail (append-only JSONL) ----
+function redactDeep(v) {
+  if (v == null) return v;
+  if (typeof v === "string") return scrub(v);
+  if (Array.isArray(v)) return v.map(redactDeep);
+  if (typeof v === "object") {
+    const o = {};
+    for (const [k, val] of Object.entries(v)) {
+      if (/key|token|secret|password|authorization/i.test(k) && typeof val === "string") o[k] = "[REDACTED]";
+      else o[k] = redactDeep(val);
+    }
+    return o;
+  }
+  return v;
+}
+function appendAudit(entry) {
+  const dir = path.dirname(AUDIT_LOG_PATH);
+  fs.mkdirSync(dir, { recursive: true });
+  const row = { timestamp: new Date().toISOString(), actor: AUDIT_ACTOR, ...entry, args: redactDeep(entry.args || {}) };
+  if (row.before !== undefined) row.before = redactDeep(row.before);
+  if (row.after !== undefined) row.after = redactDeep(row.after);
+  if (row.result !== undefined) row.result = redactDeep(row.result);
+  fs.appendFileSync(AUDIT_LOG_PATH, JSON.stringify(row) + "\n", "utf8");
+  emitEvent("audit", { tool: row.tool, dry_run: !!row.dry_run });
+  return row;
+}
+async function auditLogQuery({ limit, tool, since } = {}) {
+  let lines = [];
+  try { lines = fs.readFileSync(AUDIT_LOG_PATH, "utf8").split("\n").filter(Boolean); }
+  catch (e) { if (e.code !== "ENOENT") throw e; }
+  let rows = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  if (tool) rows = rows.filter((r) => r.tool === tool);
+  if (since) rows = rows.filter((r) => String(r.timestamp) >= String(since));
+  const n = lim(limit, 50);
+  rows = rows.slice(-n).reverse();
+  return { path: AUDIT_LOG_PATH, count: rows.length, entries: rows };
+}
+
+// ---- rate-limit awareness ----
+const rateWindows = { admin: [], store: [], health: [], docs: [] };
+const rateHeaders = { admin: {}, store: {}, health: {}, docs: {} };
+function ratePrune(surface, now = Date.now()) {
+  rateWindows[surface] = (rateWindows[surface] || []).filter((t) => now - t < 60_000);
+  return rateWindows[surface];
+}
+function rateTrack(surface) {
+  const now = Date.now();
+  const w = ratePrune(surface, now);
+  w.push(now);
+  return { count_last_min: w.length, budget: RATE_BUDGET_PER_MIN, near_limit: w.length >= RATE_BUDGET_PER_MIN * 0.8 };
+}
+async function rateWaitIfNeeded(surface) {
+  for (let i = 0; i < 20; i++) {
+    const w = ratePrune(surface);
+    if (w.length < RATE_BUDGET_PER_MIN) return;
+    const oldest = w[0];
+    const wait = Math.min(1000, Math.max(50, 60_000 - (Date.now() - oldest) + Math.floor(Math.random() * 40)));
+    await sleep(wait);
+  }
+}
+function parseRateHeaders(res, surface) {
+  const h = {};
+  const ra = res.headers.get("retry-after"); if (ra) h.retry_after = ra;
+  for (const name of ["x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "x-rate-limit-limit", "x-rate-limit-remaining", "x-rate-limit-reset"]) {
+    const v = res.headers.get(name); if (v != null) h[name] = v;
+  }
+  if (Object.keys(h).length) rateHeaders[surface] = { ...rateHeaders[surface], ...h, updated_at: new Date().toISOString() };
+  return h;
+}
+function throttleHints() {
+  const now = Date.now();
+  const out = {};
+  for (const s of Object.keys(rateWindows)) {
+    const c = ratePrune(s, now).length;
+    if (c >= RATE_BUDGET_PER_MIN * 0.8) out[s] = { count_last_min: c, budget: RATE_BUDGET_PER_MIN, near_limit: true, ...(rateHeaders[s] || {}) };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+function withThrottle(result) {
+  const throttle = throttleHints();
+  if (!throttle) return result;
+  if (result && typeof result === "object" && !Array.isArray(result)) return { ...result, throttle };
+  return { value: result, throttle };
+}
+async function rateLimitStatus() {
+  const now = Date.now();
+  const surfaces = {};
+  for (const s of ["admin", "store", "health", "docs"]) {
+    const c = ratePrune(s, now).length;
+    surfaces[s] = { count_last_min: c, budget: RATE_BUDGET_PER_MIN, near_limit: c >= RATE_BUDGET_PER_MIN * 0.8, headers: rateHeaders[s] || {} };
+  }
+  return { budget_per_min: RATE_BUDGET_PER_MIN, surfaces };
+}
+
+// ---- remediation hooks (OFF by default) ----
+const remediationRuns = [];
+async function hookPublishableKeyMissingSalesChannel({ apply }) {
+  needAdmin();
+  const keys = (await req("/admin/api-keys?type=publishable&fields=id,title,redacted,revoked_at,*sales_channels")).api_keys || [];
+  const channels = (await req("/admin/sales-channels?fields=id,name")).sales_channels || [];
+  const orphans = keys.filter((k) => !k.revoked_at && !(k.sales_channels || []).length);
+  const results = [];
+  for (const k of orphans) {
+    if (channels.length !== 1) {
+      results.push({ key_title: k.title, status: "report", message: `NO SALES CHANNEL: store has ${channels.length} sales channel(s); attach only when exactly one exists` });
+      emitEvent("key_warning", { key_title: k.title, warning: "NO SALES CHANNEL", channels: channels.length });
+      continue;
+    }
+    const sc = channels[0];
+    const body = { add: [sc.id] };
+    const pathSc = `/admin/api-keys/${encodeURIComponent(k.id)}/sales-channels`;
+    if (!apply) {
+      results.push({ key_title: k.title, status: "dry_run", would: `POST ${pathSc}`, body: { add: ["[sales_channel_id]"] }, channel_name: sc.name });
+    } else {
+      const before = { title: k.title, sales_channels: (k.sales_channels || []).map((c) => c.name || c.id) };
+      await req(pathSc, { method: "POST", body });
+      const afterKey = (await req(`/admin/api-keys?type=publishable&fields=id,title,*sales_channels`)).api_keys?.find((x) => x.id === k.id);
+      const after = { title: k.title, sales_channels: (afterKey?.sales_channels || []).map((c) => c.name || c.id) };
+      results.push({ key_title: k.title, status: "applied", channel_name: sc.name });
+      appendAudit({ tool: "remediation:publishable_key_missing_sales_channel", args: { key_title: k.title }, before, after, result: { attached: sc.name }, dry_run: false });
+    }
+  }
+  if (!orphans.length) results.push({ status: "noop", message: "no publishable keys missing a sales channel" });
+  return results;
+}
+const REMEDIATION_HOOKS = {
+  publishable_key_missing_sales_channel: {
+    description: "Attach the store's sole sales channel to publishable keys that have none (only when exactly one sales channel exists). Verified: POST /admin/api-keys/{id}/sales-channels.",
+    run: hookPublishableKeyMissingSalesChannel,
+  },
+};
+async function runRemediationHooks({ reason } = {}) {
+  if (!ENABLE_REMEDIATION) return { enabled: false, apply: false, ran: [], note: "MEDUSA_ENABLE_REMEDIATION is not set; remediation is OFF" };
+  const apply = APPLY_REMEDIATION;
+  const ran = [];
+  for (const id of REMEDIATION_ALLOWLIST) {
+    const hook = REMEDIATION_HOOKS[id];
+    if (!hook) { ran.push({ hook: id, status: "unknown_hook" }); continue; }
+    const results = await hook.run({ apply });
+    const entry = { hook: id, at: new Date().toISOString(), apply, reason: reason || null, results };
+    remediationRuns.push(entry);
+    while (remediationRuns.length > 50) remediationRuns.shift();
+    emitEvent("remediation", { hook: id, apply, results_count: results.length });
+    if (!apply) appendAudit({ tool: `remediation:${id}`, args: { reason }, result: results, dry_run: true });
+    ran.push(entry);
+  }
+  return { enabled: true, apply, ran };
+}
+async function remediationStatus({ run } = {}) {
+  const hooks = Object.entries(REMEDIATION_HOOKS).map(([id, h]) => ({
+    id,
+    description: h.description,
+    enabled: ENABLE_REMEDIATION && REMEDIATION_ALLOWLIST.includes(id),
+    allowlisted: REMEDIATION_ALLOWLIST.includes(id),
+    last_run: [...remediationRuns].reverse().find((r) => r.hook === id) || null,
+  }));
+  const base = { enabled: ENABLE_REMEDIATION, apply: APPLY_REMEDIATION, allowlist: REMEDIATION_ALLOWLIST, hooks };
+  if (run) {
+    if (!ENABLE_REMEDIATION) return { ...base, ran: [], note: "Refusing to run: set MEDUSA_ENABLE_REMEDIATION=true (still dry-run unless MEDUSA_REMEDIATION_APPLY=true)" };
+    const out = await runRemediationHooks({ reason: "remediation_status:run" });
+    return { ...base, ...out };
+  }
+  return base;
+}
+
+
+async function req(path, { method = "GET", body, admin = true, store = false, raw = false, _retried = 0 } = {}) {
   need();
   const headers = { Accept: "application/json" };
   // v2 secret API key: "Authorization: Basic <token>" (raw token accepted; base64 kept for back-compat) - see DOC.auth
   if (admin) { needAdmin(); headers.Authorization = `Basic ${ADMIN_KEY}`; }
   if (store) { if (!PUB_KEY) throw new Error("MEDUSA_PUBLISHABLE_KEY is not set; /store routes need the x-publishable-api-key header. See " + DOC.publishable); headers["x-publishable-api-key"] = PUB_KEY; }
   if (body) headers["Content-Type"] = "application/json";
-  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TIMEOUT); const t0 = performance.now();
   const surface = obsSurface(path, { store });
+  await rateWaitIfNeeded(surface);
+  rateTrack(surface);
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TIMEOUT); const t0 = performance.now();
   let status = 0;
   try {
     const res = await fetch(`${BASE}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: ac.signal });
     status = res.status;
+    parseRateHeaders(res, surface);
+    // Automatic backoff on 429/503 with jitter (retry once or twice).
+    if ((res.status === 429 || res.status === 503) && _retried < 2 && method === "GET") {
+      const ra = res.headers.get("retry-after");
+      let waitMs = ra && /^\d+$/.test(ra) ? Number(ra) * 1000 : 200 * (2 ** _retried);
+      waitMs = Math.min(5000, waitMs + Math.floor(Math.random() * 100));
+      clearTimeout(t);
+      await sleep(waitMs);
+      return req(path, { method, body, admin, store, raw, _retried: _retried + 1 });
+    }
     const text = await res.text(); let data; try { data = JSON.parse(text); } catch { data = text.slice(0, 500); }
     const ms = performance.now() - t0;
     const out = { status: res.status, ok: res.ok, data, latency_ms: Math.round(ms) };
     if (raw) {
       if (!res.ok) {
         const msg = typeof data === "string" ? data : data?.message || JSON.stringify(data).slice(0, 300);
-        obsRecord({ surface, path, status, ms, error: scrub(`${method} ${path} -> HTTP ${status}: ${msg}`) });
+        const err = scrub(`${method} ${path} -> HTTP ${status}: ${msg}`);
+        obsRecord({ surface, path, status, ms, error: err });
+        emitEvent("error", { surface, path: obsSafePath(path), status, error: err });
       } else obsRecord({ surface, path, status, ms });
       return out;
     }
@@ -109,6 +350,7 @@ async function req(path, { method = "GET", body, admin = true, store = false, ra
       const hint = res.status === 401 ? " (401: wrong, revoked, or wrong-type key; admin routes need a SECRET key, store routes a PUBLISHABLE key)" : res.status === 404 ? " (404: wrong id or route)" : "";
       const msg = scrub(`${method} ${path} -> HTTP ${res.status}${hint}: ${typeof data === "string" ? data : data?.message || JSON.stringify(data).slice(0, 300)}`);
       obsRecord({ surface, path, status, ms, error: msg });
+      emitEvent("error", { surface, path: obsSafePath(path), status, error: msg });
       throw new Error(msg);
     }
     obsRecord({ surface, path, status, ms });
@@ -118,12 +360,14 @@ async function req(path, { method = "GET", body, admin = true, store = false, ra
     if (e.name === "AbortError") {
       const msg = `${method} ${path} -> timeout after ${TIMEOUT}ms`;
       obsRecord({ surface, path, status: status || 0, ms, error: msg });
+      emitEvent("error", { surface, path: obsSafePath(path), status: 0, error: msg });
       throw new Error(msg);
     }
     if (e.message?.includes("HTTP")) throw e;
     const code = e.cause?.code || e.message; const nh = /ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|CERT|SSL|TLS|socket/i.test(code) ? " (network: backend down, wrong MEDUSA_BACKEND_URL, or this machine's egress/TLS to the backend is blocked; try `curl <url>/health` from the same machine)" : "";
     const msg = scrub(`${method} ${path} -> ${code}${nh}`);
     obsRecord({ surface, path, status: status || 0, ms, error: msg });
+    emitEvent("error", { surface, path: obsSafePath(path), status: status || 0, error: msg });
     throw new Error(msg);
   } finally { clearTimeout(t); }
 }
@@ -454,6 +698,11 @@ async function observabilityDashboard({ format, write_html } = {}) {
     recorder: { size: obsRing.length, max: RING_MAX },
     doc: DOC.api_keys,
   };
+  noteHealthTransition("health", !!surfaces.health.up, { http_status: surfaces.health.http_status });
+  noteHealthTransition("admin", !!surfaces.admin.up, { http_status: surfaces.admin.http_status });
+  noteHealthTransition("store", !!surfaces.store.up, { http_status: surfaces.store.http_status });
+  for (const k of publishable_keys) if (k.warning === "NO SALES CHANNEL") emitEvent("key_warning", { key_title: k.title, warning: k.warning });
+  if (ENABLE_REMEDIATION) report.remediation = await runRemediationHooks({ reason: "observability_dashboard" });
   const markdown = buildObsMarkdown(report);
   const out = { ...report, markdown };
   const wantHtml = format === "html" || !!write_html;
@@ -491,6 +740,10 @@ const tools = {
   inventory_level_update: { description: "Set stocked_quantity for an existing inventory level at a stock location. Dry-run (shows before) unless confirm=true; confirm also needs MEDUSA_ALLOW_PUBLISH=true (stock is always live).", inputSchema: S({ inventory_item_id: str, location_id: str, stocked_quantity: num, confirm: conf }, ["inventory_item_id", "location_id", "stocked_quantity"]), run: inventoryLevelUpdate },
   product_publish: { description: "OPT-IN: publish one product (draft -> published). Requires MEDUSA_ALLOW_PUBLISH=true AND confirm=true. Pre-checks: sales channel, prices, non-zero stock (unless allow_zero_stock). Dry-run lists blockers; confirm reads back. One product per call: no bulk publish.", inputSchema: S({ id: str, allow_zero_stock: bool, confirm: conf }, ["id"]), run: productPublish },
   live_product_update: { description: "OPT-IN: edit any product including live ones (no status changes; use product_publish). Requires MEDUSA_ALLOW_PUBLISH=true AND confirm=true. Dry-run shows current values.", inputSchema: S({ id: str, patch: { type: "object" }, confirm: conf }, ["id", "patch"]), run: liveProductUpdate },
+  events_poll_since: { description: "Read-only cursor-based poll of the in-process event stream (plugin-captured errors, health transitions, key warnings, audit/remediation). Returns events with id > cursor. Optional outbound webhook is configured via MEDUSA_EVENTS_WEBHOOK_URL (+ HMAC secret). Real Medusa store events (order.placed, etc.) need a backend subscriber — see the medusa-event-forwarding skill.", inputSchema: S({ cursor: num, limit: num }), run: eventsPollSince },
+  audit_log: { description: "Read-only query of the append-only JSONL audit trail (default ~/.medusa-plugin/audit.jsonl, override MEDUSA_AUDIT_LOG). Records every write/remediation attempt including dry-runs with redacted args and before/after snapshots.", inputSchema: S({ limit: num, tool: str, since: str }), run: auditLogQuery },
+  remediation_status: { description: "List remediation hooks, whether enabled (MEDUSA_ENABLE_REMEDIATION), allowlist, apply flag (MEDUSA_REMEDIATION_APPLY), and last runs. Pass run=true to evaluate allowlisted hooks (still dry-run unless APPLY is set). OFF by default.", inputSchema: S({ run: bool }), run: remediationStatus },
+  rate_limit_status: { description: "Read-only per-surface request counts in a 1-minute rolling window, configured budget (MEDUSA_RATE_BUDGET_PER_MIN, default 60), and last Retry-After / X-RateLimit-* headers seen. Automatic backoff on 429/503 with jitter is built into the HTTP helper.", inputSchema: S(), run: rateLimitStatus },
   observability_dashboard: { description: "Read-only observability dashboard: live /health, admin auth, store (publishable key), publishable API key table (title, redacted token, revoked, sales channels; WARN when no channel), plus in-memory latency/error recorder stats (latest/avg/p95) and recent errors with exact messages. Optional format=\"html\" or write_html=path for a self-contained dark-theme HTML file. Never records keys/headers.", inputSchema: S({ format: str, write_html: str }), run: observabilityDashboard },
   medusa_docs: { description: "Golden Rule: search the official Medusa docs index (query) or read/grep an official docs page (page, optional query). Reports 'NOT IN OFFICIAL DOCS' when nothing matches. Call before any write or unfamiliar answer.", inputSchema: S({ query: str, page: str }), run: medusaDocs },
 };
@@ -504,7 +757,30 @@ async function handle(msg) {
   if (method === "tools/call") {
     const t = tools[params?.name];
     if (!t) return { jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool ${params?.name}` } };
-    try { const out = await t.run(params.arguments || {}); return reply({ content: [{ type: "text", text: scrub(JSON.stringify(out, null, 2)) }] }); }
+    const WRITE_TOOLS = new Set(["draft_product_create", "draft_product_update", "variant_price_update", "inventory_level_update", "product_publish", "live_product_update"]);
+    try {
+      const args = params.arguments || {};
+      let before = null;
+      if (WRITE_TOOLS.has(params.name) && args.id) {
+        try {
+          if (params.name.includes("product") || params.name === "product_publish") before = (await req(`/admin/products/${encodeURIComponent(args.id)}?fields=id,title,status,handle`)).product;
+          else if (params.name === "inventory_level_update" && args.inventory_item_id) before = (await req(`/admin/inventory-items/${encodeURIComponent(args.inventory_item_id)}?fields=id,sku,*location_levels`)).inventory_item;
+        } catch { before = null; }
+      }
+      const out0 = await t.run(args);
+      const out = withThrottle(out0);
+      if (WRITE_TOOLS.has(params.name)) {
+        let after = null;
+        if (out0 && out0.dry_run === false && args.id) {
+          try {
+            if (params.name.includes("product") || params.name === "product_publish") after = (await req(`/admin/products/${encodeURIComponent(args.id)}?fields=id,title,status,handle`)).product;
+            else if (params.name === "inventory_level_update" && args.inventory_item_id) after = (await req(`/admin/inventory-items/${encodeURIComponent(args.inventory_item_id)}?fields=id,sku,*location_levels`)).inventory_item;
+          } catch { after = null; }
+        }
+        try { appendAudit({ tool: params.name, args, before, after, result: out0, dry_run: !!(out0 && out0.dry_run) }); } catch (ae) { emitEvent("error", { surface: "admin", error: scrub(`audit append failed: ${ae.message}`) }); }
+      }
+      return reply({ content: [{ type: "text", text: scrub(JSON.stringify(out, null, 2)) }] });
+    }
     catch (e) { return reply({ isError: true, content: [{ type: "text", text: `ERROR: ${scrub(e.message)}` }] }); }
   }
   if (id === undefined) return null;
@@ -514,7 +790,16 @@ async function handle(msg) {
 if ((env.MCP_TRANSPORT || "stdio") === "http") {
   const port = Number(env.MCP_PORT || 8788), bind = env.MCP_BIND || "127.0.0.1";
   http.createServer(async (rq, res) => {
-    if (rq.url !== "/mcp") { res.writeHead(404).end(); return; }
+    const u = new URL(rq.url || "/", `http://${bind}`);
+    if (u.pathname === "/events" && rq.method === "GET") {
+      // SSE event stream (localhost / bound interface only; read-only)
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+      res.write(`data: ${JSON.stringify({ type: "hello", latest_cursor: eventSeq, timestamp: new Date().toISOString() })}\n\n`);
+      sseClients.add(res);
+      rq.on("close", () => sseClients.delete(res));
+      return;
+    }
+    if (u.pathname !== "/mcp") { res.writeHead(404).end(); return; }
     if (env.MCP_AUTH_TOKEN && rq.headers.authorization !== `Bearer ${env.MCP_AUTH_TOKEN}`) { res.writeHead(401).end(); return; }
     if (rq.method !== "POST") { res.writeHead(405).end(); return; }
     let data = ""; for await (const c of rq) data += c;
@@ -524,7 +809,7 @@ if ((env.MCP_TRANSPORT || "stdio") === "http") {
       if (!out || (Array.isArray(out) && !out.length)) { res.writeHead(202).end(); return; }
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(out));
     } catch { res.writeHead(400).end(); }
-  }).listen(port, bind, () => console.error(`medusa-commerce MCP http on ${bind}:${port}/mcp`));
+  }).listen(port, bind, () => console.error(`medusa-commerce MCP http on ${bind}:${port}/mcp (SSE /events)`));
 } else {
   const rl = readline.createInterface({ input: process.stdin });
   rl.on("line", async (line) => { if (!line.trim()) return; let m; try { m = JSON.parse(line); } catch { return; } const out = await handle(m); if (out) process.stdout.write(JSON.stringify(out) + "\n"); });

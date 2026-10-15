@@ -58,6 +58,16 @@ http.createServer(async (req, res) => {
     if (type) arr = arr.filter((k) => k.type === type);
     return list("api_keys", arr);
   }
+  if ((m = p.match(/^\/admin\/api-keys\/([^/]+)\/sales-channels$/)) && req.method === "POST") {
+    const key = db.api_keys.find((x) => x.id === m[1]);
+    if (!key) return send(res, 404, { message: "not found" });
+    for (const id of j.add || []) {
+      const ch = db.channels.find((c) => c.id === id);
+      if (ch && !(key.sales_channels || []).some((c) => c.id === id)) (key.sales_channels || (key.sales_channels = [])).push({ id: ch.id, name: ch.name });
+    }
+    key.sales_channels = (key.sales_channels || []).filter((c) => !(j.remove || []).includes(c.id));
+    return send(res, 200, { api_key: key });
+  }
   return send(res, 404, { message: "not found" });
 }).listen(PORT, "127.0.0.1", () => console.error(`mock medusa on 127.0.0.1:${PORT}`));
 // A backend that resets every connection (simulates blocked egress / TLS reset).

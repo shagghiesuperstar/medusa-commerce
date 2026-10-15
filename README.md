@@ -20,7 +20,7 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 
 ## Principles
 1. **Golden Rule: official docs first.** Every skill starts with the docs, and every lesson cites a doc or is marked UNVERIFIED.
-2. **Bitter-lesson engineering.** 19 thin tools, zero dependencies, and judgment left to the model and the skills. There's no rules engine. A tool exists only where raw access would be unsafe or awkward.
+2. **Bitter-lesson engineering.** 23 thin tools, zero dependencies, and judgment left to the model and the skills. There's no rules engine. A tool exists only where raw access would be unsafe or awkward.
 3. **Compound engineering.** Every fix becomes a skill rule plus a `LESSON` regression test, logged in [docs/LESSONS.md](docs/LESSONS.md). The loop lives in `skills/compound-learnings`.
 4. **Safe by default.** Reads are the default. Writes are dry-run unless `confirm=true`. By default, products are **only created or edited as drafts**. Publishing, live edits, live prices and stock need the operator opt-in `MEDUSA_ALLOW_PUBLISH=true` **and** `confirm=true` on each call. Orders come back PII-minimal unless you explicitly opt in.
 5. **Fail loud.** Missing config, a bad key, an unreachable backend, or a draft that reads back with the wrong status all produce `FAIL` or `ERROR`, never a silent pass. Keys are redacted from every output.
@@ -42,6 +42,10 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 |---|---|---|
 | `store_health` | read | `GET /health`, `GET /admin/products?limit=1`, `GET /store/products?limit=1` |
 | `observability_dashboard` | read | live health/admin/store + `GET /admin/api-keys?type=publishable`, plus in-memory latency/error recorder; optional HTML |
+| `events_poll_since` | read | cursor poll of in-process plugin events (optional webhook) |
+| `audit_log` | read | query append-only JSONL audit trail |
+| `remediation_status` | read (hooks off by default) | list/run allowlisted remediation hooks |
+| `rate_limit_status` | read | per-surface rolling counts + rate-limit headers |
 | `list_products`, `get_product` | read | `GET /admin/products`, `GET /admin/products/{id}` |
 | `list_variants` | read | `GET /admin/products/{id}/variants` |
 | `inventory_levels` | read | `GET /admin/inventory-items` (`*location_levels`) |
@@ -57,7 +61,7 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 | `medusa_docs` | docs | docs.medusajs.com index and pages |
 
 ### Skills
-`getting-started` · `golden-rule-read-docs-first` · `draft-product-pipeline` · `catalog-hygiene` · `inventory-sync-tips` · `live-publishing-opt-in` · `medusa-cloud-cli` · `medusa-cloud-environments` · `medusa-erp-inventory-sync` · `medusa-admin-orphan-links` · `medusa-cart-taxes` · `medusa-multi-entity-architecture` · `compound-learnings`
+`getting-started` · `golden-rule-read-docs-first` · `draft-product-pipeline` · `catalog-hygiene` · `inventory-sync-tips` · `live-publishing-opt-in` · `medusa-cloud-cli` · `medusa-cloud-environments` · `medusa-erp-inventory-sync` · `medusa-admin-orphan-links` · `medusa-cart-taxes` · `medusa-multi-entity-architecture` · `medusa-event-forwarding` · `compound-learnings`
 
 Reference: [`references/known-issues.md`](references/known-issues.md) (GitHub issues to know about, existence verified).
 
@@ -114,8 +118,34 @@ node scripts/dashboard.mjs                         # writes ./medusa-dashboard.h
 node scripts/dashboard.mjs --out /tmp/dash.html     # custom path
 node scripts/dashboard.mjs --serve                  # http://127.0.0.1:8790/ (localhost only), refresh every 30s
 node scripts/dashboard.mjs --serve --port 8790 --refresh 30
+node scripts/dashboard.mjs --serve --host tailscale   # Tailscale IPv4 only; fails if Tailscale is down
 ```
 Requires the same env as the MCP server (`MEDUSA_BACKEND_URL`, `MEDUSA_ADMIN_API_KEY`, optional `MEDUSA_PUBLISHABLE_KEY`). Publishable keys with no sales channel are flagged `NO SALES CHANNEL` (WARN).
+
+
+## Event stream, audit, remediation, rate limits
+All additive and safe by default.
+
+**Events.** `events_poll_since { cursor }` returns new in-process events (errors, health transitions, key warnings, audit, remediation). Optional outbound webhook: `MEDUSA_EVENTS_WEBHOOK_URL` with `MEDUSA_EVENTS_WEBHOOK_SECRET` (HMAC-SHA256 header `X-Medusa-Plugin-Signature`), retry with backoff, fail loud. `scripts/dashboard.mjs --serve` also exposes `GET /events` (SSE) on the bind address. **Real Medusa store events** (`order.placed`, `inventory-level.updated`) need a backend subscriber — see skill `medusa-event-forwarding`; say **"not in official docs"** when the docs index has no match.
+
+**Audit.** Every write and remediation attempt (including dry-runs) appends one JSONL row to `MEDUSA_AUDIT_LOG` (default `~/.medusa-plugin/audit.jsonl`) with redacted args and before/after snapshots. Query with `audit_log`.
+
+**Remediation.** OFF unless `MEDUSA_ENABLE_REMEDIATION=true`. Still dry-run unless `MEDUSA_REMEDIATION_APPLY=true`. Allowlist: `MEDUSA_REMEDIATION_ALLOWLIST` (default `publishable_key_missing_sales_channel`). Built-in hook attaches the store's sole sales channel to orphan publishable keys only when exactly one channel exists (`POST /admin/api-keys/{id}/sales-channels`). `remediation_status` lists hooks; `run: true` evaluates them. Do not enable apply against production without a human review.
+
+**Rate limits.** The HTTP helper tracks per-surface counts in a 1-minute window (`MEDUSA_RATE_BUDGET_PER_MIN`, default 60), parses `Retry-After` / `X-RateLimit-*`, backs off on 429/503 with jitter, and adds a `throttle` hint to tool responses when near the budget. Inspect with `rate_limit_status`.
+
+
+## Hosting on a tailnet (Grok Bot pattern)
+`scripts/dashboard.mjs --serve` defaults to **127.0.0.1**. It never binds `0.0.0.0`.
+
+```
+node scripts/dashboard.mjs --serve --port 8790 --refresh 30
+node scripts/dashboard.mjs --serve --host tailscale --port 8790
+# --host tailscale runs `tailscale ip -4` and refuses to start if Tailscale is down
+# --host 100.x.y.z   # explicit Tailscale IPv4 only; replace with your node address
+```
+
+Open `http://<tailscale-ipv4>:8790/` or `http://<magicdns-hostname>:8790/` from another tailnet device (use your node's Tailscale IPv4 and MagicDNS hostname; do not commit real addresses). Keep secrets in process env only; do not write key values into launcher files. Pair with a small `ensure.sh` outside the repo if you want hourly self-restore.
 
 ## Install
 1. Install **Medusa Commerce** from the Grok Bot marketplace (or point a connector at a local checkout).

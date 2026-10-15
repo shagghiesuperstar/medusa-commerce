@@ -1,8 +1,8 @@
 {
   "name": "medusa-commerce",
   "displayName": "Medusa Commerce",
-  "version": "1.3.0",
-  "description": "Let Grok Bot manage a Medusa v2 store as an agent. Golden Rule: read the official Medusa docs before any action (built-in medusa_docs tool). Fail-loud health, read-only catalog, inventory and PII-minimal orders, draft-only products by default, and opt-in publishing (MEDUSA_ALLOW_PUBLISH plus confirm=true). Includes an mcloud CLI setup and a read-only observability dashboard.",
+  "version": "1.4.0",
+  "description": "Let Grok Bot manage a Medusa v2 store as an agent. Golden Rule: read the official Medusa docs before any action (built-in medusa_docs tool). Fail-loud health, read-only catalog, inventory and PII-minimal orders, draft-only products by default, and opt-in publishing (MEDUSA_ALLOW_PUBLISH plus confirm=true). Includes an mcloud CLI setup, read-only observability dashboard, event stream, audit trail, remediation hooks (off by default), and rate-limit awareness.",
   "author": {
     "name": "@pixelrainbownft"
   },
