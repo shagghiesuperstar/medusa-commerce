@@ -1,4 +1,4 @@
-tools: store_health, list_products, get_product, list_variants, inventory_levels, list_orders, get_order, list_categories, list_tags, list_sales_channels, store_products, draft_product_create, draft_product_update, variant_price_update, inventory_level_update, product_publish, live_product_update, medusa_docs
+tools: store_health, list_products, get_product, list_variants, inventory_levels, list_orders, get_order, list_categories, list_tags, list_sales_channels, store_products, draft_product_create, draft_product_update, variant_price_update, inventory_level_update, product_publish, live_product_update, events_poll_since, audit_log, remediation_status, rate_limit_status, observability_dashboard, medusa_docs
 
 ### store_health {}
 {
@@ -8,7 +8,7 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
       "check": "backend /health",
       "ok": true,
       "http_status": 200,
-      "latency_ms": 64,
+      "latency_ms": 57,
       "doc": "https://docs.medusajs.com/learn/deployment (\"<APP_URL>/health returns OK\")"
     },
     {
@@ -27,6 +27,50 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
     }
   ]
 }
+
+### observability_dashboard {}
+{
+  "generated_at": "2026-10-15T14:41:25.874Z",
+  "surfaces": {
+    "health": {
+      "up": true,
+      "http_status": 200,
+      "latency_ms": 2,
+      "samples": 2,
+      "latest_ms": 2,
+      "avg_ms": 30,
+      "p95_ms": 57
+    },
+    "admin": {
+      "up": true,
+      "http_status": 200,
+      "latency_ms": 2,
+      "samples": 2,
+      "latest_ms": 2,
+      "avg_ms": 4,
+      "p95_ms": 5
+    },
+    "store": {
+      "up": true,
+      "http_status": 200,
+      "latency_ms": 2,
+      "samples": 2,
+      "latest_ms": 2,
+      "avg_ms": 3,
+      "p95_ms": 3
+    },
+    "docs": {
+      "up": null,
+      "samples": 0,
+      "latest_ms": null,
+      "avg_ms": null,
+      "p95_ms": null
+    }
+  },
+  "publishable_keys": [
+    {
+      "title": "Storefront Key",
+      "redacted": "pk_test_••••abcd
 
 ### list_products {}
 {
@@ -384,9 +428,17 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
   "doc": "https://docs.medusajs.com/api/admin#products"
 }
 
-PASS  server reports v1.2.0
-PASS  18 tools listed
+PASS  server reports v1.5.0
+PASS  23 tools listed
 PASS  store_health OK with backend, secret key and publishable key
+PASS  observability_dashboard surfaces up (health/admin/store)
+PASS  observability_dashboard publishable key with no sales channel -> WARN
+PASS  observability_dashboard includes markdown summary
+PASS  observability_dashboard latency stats present
+PASS  observability_dashboard write_html writes bytes
+PASS  rate_limit_status reports budget
+PASS  events_poll_since returns cursor stream
+PASS  remediation does nothing without MEDUSA_ENABLE_REMEDIATION
 PASS  list_products returns count
 PASS  list_products filters status=draft
 PASS  get_product includes variants + sales channels
@@ -400,6 +452,7 @@ PASS  list_tags
 PASS  list_sales_channels
 PASS  store_products sees only published + channel-linked products
 PASS  SAFETY draft_product_create is dry-run by default and forces status=draft
+PASS  audit_log records dry-run writes
 PASS  LESSON v2 needs options + variants: fail loud before any write
 PASS  LESSON images go to DRAFT: confirm creates draft and verifies by read-back
 PASS  LESSON warns when no sales channel (invisible to publishable key)
@@ -436,5 +489,11 @@ PASS  LESSON fail-loud: unreachable backend -> FAIL
 PASS  no publishable key -> WARN, not silent OK
 PASS  store_products without publishable key fails loud
 PASS  missing admin key fails loud with setup hint
+PASS  observability: store error message captured verbatim
+PASS  observability: no secrets in dashboard output
+PASS  events_poll_since includes captured store error
+PASS  remediation dry-run with ENABLE only (no APPLY)
+PASS  orphan key still has no channel after dry-run remediation
+PASS  throttle hint when near rate budget
 
-SMOKE PASS (52/52)
+SMOKE PASS (67/67)

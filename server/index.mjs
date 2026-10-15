@@ -10,7 +10,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const env = process.env;
 const BASE = (env.MEDUSA_BACKEND_URL || "").replace(/\/+$/, "");
 const ADMIN_KEY = env.MEDUSA_ADMIN_API_KEY || "";

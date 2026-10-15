@@ -1,0 +1,13 @@
+{
+  "_comment": "Example only. Copy OUTSIDE the repo. Holds env var NAMES, never key values. Stores default to enabled=false.",
+  "refresh_sec": 60,
+  "max_backoff_sec": 900,
+  "history_max": 1000,
+  "docs_url": "https://docs.medusajs.com/llms.txt",
+  "blocked_hosts": ["blocked-backend.example.com"],
+  "stores": [
+    { "id": "store-a", "label": "Store A", "enabled": true, "backend_url": "https://store-a.example.com", "admin_key_env": "MEDUSA_STORE_A_ADMIN_KEY", "publishable_key_env": "MEDUSA_STORE_A_PUBLISHABLE_KEY" },
+    { "id": "store-b", "label": "Store B (no keys yet)", "enabled": true, "backend_url": "https://store-b.example.com", "admin_key_env": "MEDUSA_STORE_B_ADMIN_KEY", "publishable_key_env": "MEDUSA_STORE_B_PUBLISHABLE_KEY" },
+    { "id": "store-c", "label": "Store C (off limits)", "enabled": false, "backend_url": "https://store-c.example.com" }
+  ]
+}

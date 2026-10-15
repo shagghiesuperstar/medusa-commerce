@@ -32,7 +32,7 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 | MCP config (stdio) / remote + official MCP example | `mcp.json`, `mcp.remote.example.json` |
 | Skills (13), known-issues reference | `skills/`, `references/` |
 | mcloud CLI installer (persistent, self-restoring) | `scripts/setup-mcloud.sh` |
-| Observability dashboard (HTML + optional localhost serve) | `scripts/dashboard.mjs` |
+| Multi-store observability dashboard (HTML + JSON, localhost/tailnet serve) | `scripts/dashboard.mjs` |
 | Manifests | `.cursor-plugin/plugin.json`, `plugin.json` |
 | Lessons, changelog | `docs/LESSONS.md`, `CHANGELOG.md` |
 | Tests (mock Medusa + docs, smoke, skills lint, privacy scan) | `test/` |
@@ -112,21 +112,22 @@ Read-only live checks plus an in-memory latency/error recorder (ring buffer, las
 
 **MCP tool:** ask Grok Bot to run `observability_dashboard`. It returns JSON (surfaces up/down, latest/avg/p95 ms, publishable key table, recent errors with exact messages) and a markdown summary. Pass `format: "html"` to include a self-contained dark-theme HTML document, or `write_html: "/path/to/file.html"` to write it to disk.
 
-**CLI script:**
+**Multi-store dashboard (v1.5.0):** `scripts/dashboard.mjs` serves one page with a tab per store and the same sections per tab: surfaces (health, admin, store, docs) with status, HTTP code, live/latest/avg/p95 ms, sample count and error; publishable keys (redacted, revoked, sales channels, `NO SALES CHANNEL` WARN); recent errors; event feed (`events_poll_since`); credentials by env var **name** only; plus a global audit section (`audit_log`, read-only).
 ```
-node scripts/dashboard.mjs                         # writes ./medusa-dashboard.html
-node scripts/dashboard.mjs --out /tmp/dash.html     # custom path
-node scripts/dashboard.mjs --serve                  # http://127.0.0.1:8790/ (localhost only), refresh every 30s
-node scripts/dashboard.mjs --serve --port 8790 --refresh 30
-node scripts/dashboard.mjs --serve --host tailscale   # Tailscale IPv4 only; fails if Tailscale is down
+node scripts/dashboard.mjs --config /path/outside/repo/stores.json --state-dir /path/state           # one cycle, writes HTML
+node scripts/dashboard.mjs --config stores.json --state-dir DIR --serve --host 127.0.0.1 --port 8790
+node scripts/dashboard.mjs --config stores.json --serve --host tailscale   # Tailscale IPv4 only; 0.0.0.0 is refused
 ```
-Requires the same env as the MCP server (`MEDUSA_BACKEND_URL`, `MEDUSA_ADMIN_API_KEY`, optional `MEDUSA_PUBLISHABLE_KEY`). Publishable keys with no sales channel are flagged `NO SALES CHANNEL` (WARN).
-
+- **Config** (`scripts/stores.example.json`): keep the real file outside the repo. It lists env var names, never values. `enabled` defaults to **false**; a disabled store (or one whose host is in `blocked_hosts`) is never contacted, not even `/health`, and its tab shows *disabled by store-access rule*. A store with no keys present shows *no key configured* and only the unauthenticated `/health` runs.
+- **JSON:** `GET /api/status.json` and `GET /api/stores/<id>.json` (no secrets; configured key values are scrubbed from every response). Only GET is accepted.
+- **History:** bounded JSONL ring per store at `<state-dir>/history/<id>.jsonl` (`history_max`, min 500, default 1000). avg/p95/uptime come from this file, so they survive restarts.
+- **Polite polling:** each store has its own MCP child with only that store's keys; one request at a time per store; base interval `refresh_sec` (min 10, default 60), doubling on any error/4xx/5xx/timeout up to `max_backoff_sec`.
+- Without `--config` it falls back to a single store from `MEDUSA_BACKEND_URL` / `MEDUSA_ADMIN_API_KEY` / `MEDUSA_PUBLISHABLE_KEY`.
 
 ## Event stream, audit, remediation, rate limits
 All additive and safe by default.
 
-**Events.** `events_poll_since { cursor }` returns new in-process events (errors, health transitions, key warnings, audit, remediation). Optional outbound webhook: `MEDUSA_EVENTS_WEBHOOK_URL` with `MEDUSA_EVENTS_WEBHOOK_SECRET` (HMAC-SHA256 header `X-Medusa-Plugin-Signature`), retry with backoff, fail loud. `scripts/dashboard.mjs --serve` also exposes `GET /events` (SSE) on the bind address. **Real Medusa store events** (`order.placed`, `inventory-level.updated`) need a backend subscriber — see skill `medusa-event-forwarding`; say **"not in official docs"** when the docs index has no match.
+**Events.** `events_poll_since { cursor }` returns new in-process events (errors, health transitions, key warnings, audit, remediation). Optional outbound webhook: `MEDUSA_EVENTS_WEBHOOK_URL` with `MEDUSA_EVENTS_WEBHOOK_SECRET` (HMAC-SHA256 header `X-Medusa-Plugin-Signature`), retry with backoff, fail loud. The multi-store dashboard shows each store's event feed in its tab and in `/api/stores/<id>.json`. **Real Medusa store events** (`order.placed`, `inventory-level.updated`) need a backend subscriber — see skill `medusa-event-forwarding`; say **"not in official docs"** when the docs index has no match.
 
 **Audit.** Every write and remediation attempt (including dry-runs) appends one JSONL row to `MEDUSA_AUDIT_LOG` (default `~/.medusa-plugin/audit.jsonl`) with redacted args and before/after snapshots. Query with `audit_log`.
 
