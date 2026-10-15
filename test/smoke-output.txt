@@ -1,0 +1,387 @@
+tools: store_health, list_products, get_product, list_variants, inventory_levels, list_orders, get_order, list_categories, list_tags, list_sales_channels, store_products, draft_product_create, draft_product_update, variant_price_update, inventory_level_update, medusa_docs
+
+### store_health {}
+{
+  "verdict": "OK",
+  "checks": [
+    {
+      "check": "backend /health",
+      "ok": true,
+      "http_status": 200,
+      "latency_ms": 59,
+      "doc": "https://docs.medusajs.com/learn/deployment (\"<APP_URL>/health returns OK\")"
+    },
+    {
+      "check": "admin auth (secret key)",
+      "ok": true,
+      "http_status": 200,
+      "product_count": 2,
+      "doc": "https://docs.medusajs.com/api/admin#authentication"
+    },
+    {
+      "check": "store API (publishable key)",
+      "ok": true,
+      "http_status": 200,
+      "visible_products": 1,
+      "doc": "https://docs.medusajs.com/api/store#publishable-api-key"
+    }
+  ]
+}
+
+### list_products {}
+{
+  "count": 2,
+  "offset": 0,
+  "limit": 20,
+  "products": [
+    {
+      "id": "prod_1",
+      "title": "Sample Tee",
+      "handle": "sample-tee",
+      "status": "published",
+      "variants": [
+        {
+          "id": "variant_1",
+          "title": "S",
+          "sku": "TEE-S",
+          "manage_inventory": true,
+          "prices": [
+            {
+              "id": "price_1",
+              "amount": 20,
+              "currency_code": "usd"
+            },
+            {
+              "id": "price_2",
+              "amount": 18,
+              "currency_code": "eur"
+            }
+          ],
+          "options": []
+        }
+      ]
+    },
+    {
+      "id": "prod_2",
+      "title": "Draft Mug",
+      "handle": "draft-mug",
+      "status": "draft",
+      "variants": [
+        {
+    
+
+### get_product {"id":"prod_1"}
+{
+  "product": {
+    "id": "prod_1",
+    "title": "Sample Tee",
+    "handle": "sample-tee",
+    "status": "published",
+    "thumbnail": null,
+    "variants": [
+      {
+        "id": "variant_1",
+        "title": "S",
+        "sku": "TEE-S",
+        "manage_inventory": true,
+        "prices": [
+          {
+            "id": "price_1",
+            "amount": 20,
+            "currency_code": "usd"
+          },
+          {
+            "id": "price_2",
+            "amount": 18,
+            "currency_code": "eur"
+          }
+        ],
+        "options": []
+      }
+    ],
+    "categories": [],
+    "tags": [
+      {
+        "id": "ptag_1",
+        "value": "new"
+      }
+    ],
+    "sales_channels": [
+      {
+        "id": "sc_1"
+      }
+    ]
+  },
+  "doc": "https://docs.medusajs.com/api/admin#prod
+
+### list_variants {"product_id":"prod_1"}
+{
+  "count": 1,
+  "variants": [
+    {
+      "id": "variant_1",
+      "title": "S",
+      "sku": "TEE-S",
+      "manage_inventory": true,
+      "prices": [
+        {
+          "id": "price_1",
+          "amount": 20,
+          "currency_code": "usd"
+        },
+        {
+          "id": "price_2",
+          "amount": 18,
+          "currency_code": "eur"
+        }
+      ],
+      "options": []
+    }
+  ],
+  "doc": "https://docs.medusajs.com/api/admin#products_getproductsidvariants"
+}
+
+### inventory_levels {"sku":"TEE-S"}
+{
+  "count": 1,
+  "inventory_items": [
+    {
+      "id": "iitem_1",
+      "sku": "TEE-S",
+      "title": "Sample Tee S",
+      "levels": [
+        {
+          "location_id": "sloc_1",
+          "stocked_quantity": 10,
+          "reserved_quantity": 2,
+          "available_quantity": 8
+        }
+      ]
+    }
+  ],
+  "doc": "https://docs.medusajs.com/api/admin#inventory-items"
+}
+
+### list_orders {}
+{
+  "count": 1,
+  "orders": [
+    {
+      "id": "order_1",
+      "display_id": 1,
+      "status": "pending",
+      "payment_status": "captured",
+      "fulfillment_status": "not_fulfilled",
+      "total": 20,
+      "currency_code": "usd",
+      "created_at": "2026-10-01T00:00:00Z"
+    }
+  ],
+  "note": "PII-minimal fields. Use get_order with include_customer=true only when needed.",
+  "doc": "https://docs.medusajs.com/api/admin#orders"
+}
+
+### store_products {}
+{
+  "count": 1,
+  "products": [
+    {
+      "id": "prod_1",
+      "title": "Sample Tee",
+      "handle": "sample-tee"
+    }
+  ],
+  "note": "What a shopper sees through this publishable key's sales channel(s).",
+  "doc": "https://docs.medusajs.com/api/store#products"
+}
+
+### draft_product_create {"title":"New Cap","handle":"new-cap","images":["https://cdn.example.com/cap.png"],"options":[{"title":"Default","values":["Default"]}],"variants":[{"title":"Default","sku":"CAP-1","options":{"Default":"Default"},"prices":[{"amount":15,"currency_code":"usd"}]}],"sales_channel_ids":["sc_1"]}
+{
+  "dry_run": true,
+  "action": "POST /admin/products",
+  "request": {
+    "title": "New Cap",
+    "status": "draft",
+    "handle": "new-cap",
+    "thumbnail": "https://cdn.example.com/cap.png",
+    "images": [
+      {
+        "url": "https://cdn.example.com/cap.png"
+      }
+    ],
+    "options": [
+      {
+        "title": "Default",
+        "values": [
+          "Default"
+        ]
+      }
+    ],
+    "variants": [
+      {
+        "title": "Default",
+        "sku": "CAP-1",
+        "options": {
+          "Default": "Default"
+        },
+        "prices": [
+          {
+            "amount": 15,
+            "currency_code": "usd"
+          }
+        ]
+      }
+    ],
+    "sales_channels": [
+      {
+        "id": "sc_1"
+      }
+    ]
+  },
+  "warnings": [],
+  "doc": "https://docs.medusajs.com/a
+
+### draft_product_create {"title":"New Cap","handle":"new-cap","images":["https://cdn.example.com/cap.png"],"options":[{"title":"Default","values":["Default"]}],"variants":[{"title":"Default","sku":"CAP-1","options":{"Default":"Default"},"prices":[{"amount":15,"currency_code":"usd"}]}],"sales_channel_ids":["sc_1"],"confirm":true}
+{
+  "dry_run": false,
+  "created": {
+    "id": "prod_3",
+    "status": "draft",
+    "handle": "new-cap",
+    "thumbnail": "https://cdn.example.com/cap.png"
+  },
+  "warnings": [],
+  "verified": "read back status=draft",
+  "doc": "https://docs.medusajs.com/api/admin#products"
+}
+
+### draft_product_update {"id":"prod_2","patch":{"title":"Draft Mug v2","metadata":{"dims":{"h":1}}}}
+{
+  "dry_run": true,
+  "action": "POST /admin/products/prod_2",
+  "request": {
+    "title": "Draft Mug v2",
+    "metadata": {
+      "dims": {
+        "h": 1
+      }
+    }
+  },
+  "current": {
+    "id": "prod_2",
+    "title": "Draft Mug",
+    "status": "draft",
+    "metadata": {}
+  },
+  "warnings": [
+    "nested metadata objects are REPLACED, not merged; pass the whole nested object"
+  ],
+  "doc": "https://docs.medusajs.com/api/admin#products",
+  "next": "Review, then call again with confirm=true to execute."
+}
+
+### variant_price_update {"product_id":"prod_1","variant_id":"variant_1","currency_code":"USD","amount":25}
+{
+  "dry_run": true,
+  "action": "POST /admin/products/prod_1/variants/variant_1",
+  "request": {
+    "prices": [
+      {
+        "id": "price_1",
+        "amount": 25,
+        "currency_code": "usd"
+      },
+      {
+        "id": "price_2",
+        "amount": 18,
+        "currency_code": "eur"
+      }
+    ]
+  },
+  "sku": "TEE-S",
+  "before": [
+    {
+      "id": "price_1",
+      "amount": 20,
+      "currency_code": "usd"
+    },
+    {
+      "id": "price_2",
+      "amount": 18,
+      "currency_code": "eur"
+    }
+  ],
+  "doc": "https://docs.medusajs.com/api/admin#products_getproductsidvariants",
+  "next": "Review, then call again with confirm=true to execute."
+}
+
+### inventory_level_update {"inventory_item_id":"iitem_1","location_id":"sloc_1","stocked_quantity":1}
+{
+  "dry_run": true,
+  "action": "POST /admin/inventory-items/iitem_1/location-levels/sloc_1",
+  "request": {
+    "stocked_quantity": 1
+  },
+  "sku": "TEE-S",
+  "before": {
+    "stocked_quantity": 10,
+    "reserved_quantity": 2
+  },
+  "warnings": [
+    "new stocked_quantity 1 is below reserved_quantity 2"
+  ],
+  "doc": "https://docs.medusajs.com/api/admin#inventory-items",
+  "next": "Review, then call again with confirm=true to execute."
+}
+
+### medusa_docs {"query":"publishable api keys"}
+{
+  "index": "http://127.0.0.1:19050/llms.txt",
+  "matches": [
+    "- [Sales Channel Module](http://127.0.0.1:19050/resources/commerce-modules/sales-channel): publishable API keys scope store requests",
+    "- [Admin API Reference](http://127.0.0.1:19050/api/admin): authentication with secret API keys, products, inventory"
+  ],
+  "verdict": "FOUND: open the best page with medusa_docs {page}",
+  "tip": "Medusa also hosts official remote MCPs (OAuth, Medusa Cloud account): Docs MCP https://docs.medusajs.com/mcp and read-only Cloud store MCP https://cloud.medusajs.com/mcp."
+}
+
+PASS  server reports v1.0.0
+PASS  16 tools listed
+PASS  store_health OK with backend, secret key and publishable key
+PASS  list_products returns count
+PASS  list_products filters status=draft
+PASS  get_product includes variants + sales channels
+PASS  list_variants shows sku + prices
+PASS  inventory_levels shows stocked/reserved/available
+PASS  LESSON PII-minimal: list_orders has no email/address
+PASS  get_order hides customer by default
+PASS  get_order include_customer=true opt-in
+PASS  list_categories
+PASS  list_tags
+PASS  list_sales_channels
+PASS  store_products sees only published + channel-linked products
+PASS  SAFETY draft_product_create is dry-run by default and forces status=draft
+PASS  LESSON v2 needs options + variants: fail loud before any write
+PASS  LESSON images go to DRAFT: confirm creates draft and verifies by read-back
+PASS  LESSON warns when no sales channel (invisible to publishable key)
+PASS  SAFETY never publishes: status change refused
+PASS  SAFETY draft_product_update refuses non-draft products
+PASS  draft_product_update dry-run + nested metadata warning
+PASS  SAFETY price update dry-run keeps other currencies
+PASS  LESSON price update does not drop other currencies
+PASS  SAFETY inventory update dry-run shows before + warns below reserved
+PASS  inventory update fails loud on missing location level
+PASS  inventory update confirm writes
+PASS  medusa_docs finds index entries
+PASS  GOLDEN RULE: missing topic -> NOT IN OFFICIAL DOCS
+PASS  medusa_docs greps an official page
+PASS  medusa_docs refuses non-official origins
+PASS  LESSON no secrets in tool output
+PASS  LESSON fail-loud: bad secret key -> FAIL
+PASS  401 error names the key type, never the key
+PASS  LESSON fail-loud: unreachable backend -> FAIL
+PASS  no publishable key -> WARN, not silent OK
+PASS  store_products without publishable key fails loud
+PASS  missing admin key fails loud with setup hint
+
+SMOKE PASS (38/38)

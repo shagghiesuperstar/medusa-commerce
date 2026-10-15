@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "medusa-commerce",
+  "version": "1.0.0",
+  "description": "Run a Medusa v2 store from Grok Bot. Golden Rule: read the official Medusa docs before any action (built-in medusa_docs tool). Fail-loud store health, read-only catalog, inventory and PII-minimal orders, and draft-only product creation. Price and stock writes stay dry-run unless confirm=true. Never auto-publishes.",
+  "author": { "name": "@pixelrainbownft" },
+  "homepage": "https://pixelrainbow.ai",
+  "repository": "https://github.com/shagghiesuperstar/medusa-commerce",
+  "license": "MIT",
+  "keywords": ["commerce","docs-first","draft-products","ecommerce","inventory","mcp","medusa","medusajs","orders"]
+}

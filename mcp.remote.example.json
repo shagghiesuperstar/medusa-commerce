@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "medusa-commerce": {
+      "url": "http://YOUR-PRIVATE-HOST:8788/mcp",
+      "headers": { "Authorization": "Bearer ${MCP_AUTH_TOKEN}" }
+    },
+    "medusa-docs-official": { "url": "https://docs.medusajs.com/mcp" },
+    "medusa-cloud-official": { "url": "https://cloud.medusajs.com/mcp" }
+  }
+}

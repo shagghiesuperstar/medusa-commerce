@@ -1,0 +1,250 @@
+#!/usr/bin/env node
+// Medusa Commerce MCP server for Grok Bot. Zero dependencies (Node >= 18).
+// Transports: stdio (default) or Streamable HTTP JSON (MCP_TRANSPORT=http, MCP_PORT, MCP_AUTH_TOKEN).
+// Principles: docs-first (medusa_docs), thin tools, read-only by default, writes dry-run unless confirm=true,
+// products are only ever created/kept as DRAFT (never auto-publish), fail loud, never echo secrets.
+import http from "node:http";
+import readline from "node:readline";
+
+const VERSION = "1.0.0";
+const env = process.env;
+const BASE = (env.MEDUSA_BACKEND_URL || "").replace(/\/+$/, "");
+const ADMIN_KEY = env.MEDUSA_ADMIN_API_KEY || "";
+const PUB_KEY = env.MEDUSA_PUBLISHABLE_KEY || "";
+const TIMEOUT = Number(env.MEDUSA_TIMEOUT_MS || 15000);
+const DOCS_BASE = (env.MEDUSA_DOCS_BASE || "https://docs.medusajs.com/").replace(/\/?$/, "/");
+const DOCS_INDEX = env.MEDUSA_DOCS_INDEX || `${DOCS_BASE}llms.txt`;
+
+// Every endpoint this server calls, with the official reference it was verified against (Golden Rule).
+const API = "https://docs.medusajs.com/api/admin";
+const DOC = {
+  auth: `${API}#authentication`,
+  health: "https://docs.medusajs.com/learn/deployment (\"<APP_URL>/health returns OK\")",
+  products: `${API}#products`, variants: `${API}#products_getproductsidvariants`,
+  inventory: `${API}#inventory-items`, orders: `${API}#orders`,
+  categories: `${API}#product-categories`, tags: `${API}#product-tags`,
+  sales_channels: `${API}#sales-channels`, store_products: "https://docs.medusajs.com/api/store#products",
+  publishable: "https://docs.medusajs.com/api/store#publishable-api-key",
+};
+
+function need() {
+  if (!BASE) throw new Error("MEDUSA_BACKEND_URL is not set (e.g. https://<your-backend> or http://localhost:9000)");
+}
+function needAdmin() {
+  need();
+  if (!ADMIN_KEY) throw new Error("MEDUSA_ADMIN_API_KEY is not set. Create a secret API key in Medusa Admin (Settings > Secret API Keys). See " + DOC.auth);
+}
+const scrub = (s) => { let t = String(s); for (const k of [ADMIN_KEY, PUB_KEY]) if (k) t = t.split(k).join("[REDACTED]"); return t; };
+
+async function req(path, { method = "GET", body, admin = true, store = false, raw = false } = {}) {
+  need();
+  const headers = { Accept: "application/json" };
+  // v2 secret API key: "Authorization: Basic <token>" (raw token accepted; base64 kept for back-compat) - see DOC.auth
+  if (admin) { needAdmin(); headers.Authorization = `Basic ${ADMIN_KEY}`; }
+  if (store) { if (!PUB_KEY) throw new Error("MEDUSA_PUBLISHABLE_KEY is not set; /store routes need the x-publishable-api-key header. See " + DOC.publishable); headers["x-publishable-api-key"] = PUB_KEY; }
+  if (body) headers["Content-Type"] = "application/json";
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TIMEOUT); const t0 = performance.now();
+  try {
+    const res = await fetch(`${BASE}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: ac.signal });
+    const text = await res.text(); let data; try { data = JSON.parse(text); } catch { data = text.slice(0, 500); }
+    const out = { status: res.status, ok: res.ok, data, latency_ms: Math.round(performance.now() - t0) };
+    if (raw) return out;
+    if (!res.ok) {
+      const hint = res.status === 401 ? " (401: wrong, revoked, or wrong-type key; admin routes need a SECRET key, store routes a PUBLISHABLE key)" : res.status === 404 ? " (404: wrong id or route)" : "";
+      throw new Error(scrub(`${method} ${path} -> HTTP ${res.status}${hint}: ${typeof data === "string" ? data : data?.message || JSON.stringify(data).slice(0, 300)}`));
+    }
+    return data;
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error(`${method} ${path} -> timeout after ${TIMEOUT}ms`);
+    if (e.message?.includes("HTTP")) throw e;
+    throw new Error(scrub(`${method} ${path} -> ${e.cause?.code || e.message}`));
+  } finally { clearTimeout(t); }
+}
+const qs = (o) => { const p = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") p.set(k, String(v)); const s = p.toString(); return s ? `?${s}` : ""; };
+const lim = (n, d = 20) => Math.min(Math.max(Number(n) || d, 1), 100);
+const dry = (action, request, extra = {}) => ({ dry_run: true, action, request, ...extra, next: "Review, then call again with confirm=true to execute." });
+
+// ---- tools ----
+async function storeHealth() {
+  const checks = [];
+  if (!BASE) return { verdict: "FAIL", checks: [{ check: "config", ok: false, error: "MEDUSA_BACKEND_URL is not set" }] };
+  const h = await req("/health", { admin: false, raw: true }).catch((e) => ({ ok: false, error: e.message }));
+  checks.push({ check: "backend /health", ok: !!h.ok, http_status: h.status, latency_ms: h.latency_ms, ...(h.error ? { error: h.error } : {}), doc: DOC.health });
+  if (ADMIN_KEY) {
+    const a = await req("/admin/products?limit=1&fields=id", { raw: true }).catch((e) => ({ ok: false, error: e.message }));
+    checks.push({ check: "admin auth (secret key)", ok: !!a.ok, http_status: a.status, ...(a.ok ? { product_count: a.data?.count } : { error: a.error || `HTTP ${a.status}` }), doc: DOC.auth });
+  } else checks.push({ check: "admin auth (secret key)", ok: false, error: "MEDUSA_ADMIN_API_KEY not set" });
+  const warnings = [];
+  if (PUB_KEY) {
+    const s = await req("/store/products?limit=1&fields=id", { admin: false, store: true, raw: true }).catch((e) => ({ ok: false, error: e.message }));
+    checks.push({ check: "store API (publishable key)", ok: !!s.ok, http_status: s.status, ...(s.ok ? { visible_products: s.data?.count } : { error: s.error || `HTTP ${s.status}` }), doc: DOC.publishable });
+    if (s.ok && s.data?.count === 0) warnings.push("publishable key works but its sales channel exposes 0 products (check product <-> sales channel links)");
+  } else warnings.push("MEDUSA_PUBLISHABLE_KEY not set: storefront visibility not checked");
+  const failed = checks.filter((c) => !c.ok);
+  return { verdict: failed.length ? "FAIL" : warnings.length ? "WARN" : "OK", checks, ...(warnings.length ? { warnings } : {}) };
+}
+
+const PRODUCT_FIELDS = "id,title,handle,status,thumbnail,updated_at,*variants,*categories,*tags,*sales_channels";
+async function listProducts({ q, status, limit, offset, fields }) {
+  const d = await req(`/admin/products${qs({ q, ...(status ? { "status[]": status } : {}), limit: lim(limit), offset, fields: fields || "id,title,handle,status,updated_at,variants.sku" })}`);
+  return { count: d.count, offset: d.offset, limit: d.limit, products: d.products, doc: DOC.products };
+}
+async function getProduct({ id, fields }) { if (!id) throw new Error("id is required"); const d = await req(`/admin/products/${encodeURIComponent(id)}${qs({ fields: fields || PRODUCT_FIELDS })}`); return { product: d.product, doc: DOC.products }; }
+async function listVariants({ product_id, limit, offset }) {
+  if (!product_id) throw new Error("product_id is required");
+  const d = await req(`/admin/products/${encodeURIComponent(product_id)}/variants${qs({ limit: lim(limit, 50), offset, fields: "id,title,sku,manage_inventory,*prices,*options" })}`);
+  return { count: d.count, variants: d.variants, doc: DOC.variants };
+}
+async function inventoryLevels({ sku, q, limit, offset }) {
+  const d = await req(`/admin/inventory-items${qs({ sku, q, limit: lim(limit, 50), offset, fields: "id,sku,title,*location_levels" })}`);
+  const items = (d.inventory_items || []).map((i) => ({ id: i.id, sku: i.sku, title: i.title, levels: (i.location_levels || []).map((l) => ({ location_id: l.location_id, stocked_quantity: l.stocked_quantity, reserved_quantity: l.reserved_quantity, available_quantity: l.available_quantity })) }));
+  return { count: d.count, inventory_items: items, doc: DOC.inventory };
+}
+// Orders: minimal fields by default so customer PII (email, addresses) never enters the chat unless asked.
+const ORDER_FIELDS = "id,display_id,status,payment_status,fulfillment_status,total,currency_code,created_at";
+async function listOrders({ status, limit, offset, created_after }) {
+  const d = await req(`/admin/orders${qs({ ...(status ? { "status[]": status } : {}), ...(created_after ? { "created_at[$gte]": created_after } : {}), order: "-created_at", limit: lim(limit), offset, fields: ORDER_FIELDS })}`);
+  return { count: d.count, orders: d.orders, note: "PII-minimal fields. Use get_order with include_customer=true only when needed.", doc: DOC.orders };
+}
+async function getOrder({ id, include_customer }) {
+  if (!id) throw new Error("id is required");
+  const fields = `${ORDER_FIELDS},*items,*fulfillments${include_customer ? ",email,*shipping_address" : ""}`;
+  const d = await req(`/admin/orders/${encodeURIComponent(id)}${qs({ fields })}`); return { order: d.order, doc: DOC.orders };
+}
+async function listCategories({ q, limit }) { const d = await req(`/admin/product-categories${qs({ q, limit: lim(limit, 100), fields: "id,name,handle,is_active,is_internal,parent_category_id" })}`); return { count: d.count, product_categories: d.product_categories, doc: DOC.categories }; }
+async function listTags({ q, limit }) { const d = await req(`/admin/product-tags${qs({ q, limit: lim(limit, 100), fields: "id,value" })}`); return { count: d.count, product_tags: d.product_tags, doc: DOC.tags }; }
+async function listSalesChannels() { const d = await req(`/admin/sales-channels${qs({ fields: "id,name,is_disabled" })}`); return { count: d.count, sales_channels: d.sales_channels, doc: DOC.sales_channels }; }
+async function storeProducts({ q, limit, region_id }) { const d = await req(`/store/products${qs({ q, region_id, limit: lim(limit), fields: "id,title,handle" })}`, { admin: false, store: true }); return { count: d.count, products: d.products, note: "What a shopper sees through this publishable key's sales channel(s).", doc: DOC.store_products }; }
+
+// ---- writes: draft-only, dry-run unless confirm=true ----
+async function draftProductCreate({ title, handle, description, images, options, variants, category_ids, tag_ids, sales_channel_ids, metadata, confirm }) {
+  if (!title) throw new Error("title is required");
+  if (!Array.isArray(options) || !options.length || !Array.isArray(variants) || !variants.length) throw new Error("v2 requires at least one option and one variant (e.g. options=[{title:'Default',values:['Default']}], variants=[{title:'Default',sku:'...',options:{Default:'Default'},prices:[{amount:1000,currency_code:'usd'}]}]). See " + DOC.products);
+  const imgs = (images || []).filter(Boolean);
+  const body = { title, status: "draft", ...(handle ? { handle } : {}), ...(description ? { description } : {}),
+    ...(imgs.length ? { thumbnail: imgs[0], images: imgs.map((url) => ({ url })) } : {}), options, variants,
+    ...(category_ids?.length ? { categories: category_ids.map((id) => ({ id })) } : {}), ...(tag_ids?.length ? { tags: tag_ids.map((id) => ({ id })) } : {}),
+    ...(sales_channel_ids?.length ? { sales_channels: sales_channel_ids.map((id) => ({ id })) } : {}), ...(metadata ? { metadata } : {}) };
+  const warnings = [];
+  if (!sales_channel_ids?.length) warnings.push("no sales_channel_ids: product will not be visible to any publishable key once published");
+  if (!imgs.length) warnings.push("no images");
+  if (!confirm) return dry("POST /admin/products", body, { warnings, doc: DOC.products });
+  const d = await req("/admin/products", { method: "POST", body });
+  const back = await req(`/admin/products/${encodeURIComponent(d.product.id)}?fields=id,status,handle,thumbnail`);
+  if (back.product.status !== "draft") throw new Error(`FAIL LOUD: created product ${d.product.id} reads back status=${back.product.status}, expected draft. Check it in Medusa Admin now.`);
+  return { dry_run: false, created: back.product, warnings, verified: "read back status=draft", doc: DOC.products };
+}
+async function draftProductUpdate({ id, patch, confirm }) {
+  if (!id || !patch || typeof patch !== "object") throw new Error("id and patch are required");
+  if ("status" in patch && patch.status !== "draft") throw new Error("Refusing to change status: this plugin never publishes. Publish in Medusa Admin after human review.");
+  const cur = (await req(`/admin/products/${encodeURIComponent(id)}?fields=id,title,status,metadata`)).product;
+  if (cur.status !== "draft") throw new Error(`Refusing: product ${id} is '${cur.status}', not draft. This tool only edits drafts.`);
+  const warnings = [];
+  if (patch.metadata && Object.values(patch.metadata).some((v) => v && typeof v === "object" && !Array.isArray(v))) warnings.push("nested metadata objects are REPLACED, not merged; pass the whole nested object");
+  if (!confirm) return dry(`POST /admin/products/${id}`, patch, { current: cur, warnings, doc: DOC.products });
+  const d = await req(`/admin/products/${encodeURIComponent(id)}`, { method: "POST", body: patch });
+  return { dry_run: false, product: { id: d.product.id, status: d.product.status, title: d.product.title }, warnings, doc: DOC.products };
+}
+async function variantPriceUpdate({ product_id, variant_id, currency_code, amount, confirm }) {
+  if (!product_id || !variant_id || !currency_code || amount === undefined) throw new Error("product_id, variant_id, currency_code and amount are required");
+  if (!(Number(amount) >= 0)) throw new Error("amount must be a non-negative number in the currency's main unit as stored by your store (check an existing price first)");
+  const cc = String(currency_code).toLowerCase();
+  const v = (await req(`/admin/products/${encodeURIComponent(product_id)}/variants/${encodeURIComponent(variant_id)}?fields=id,sku,*prices`)).variant;
+  const prices = (v.prices || []).map((p) => ({ id: p.id, amount: p.amount, currency_code: p.currency_code, ...(p.rules && Object.keys(p.rules).length ? { rules: p.rules } : {}) }));
+  const hit = prices.find((p) => p.currency_code === cc && !p.rules);
+  if (hit) hit.amount = Number(amount); else prices.push({ amount: Number(amount), currency_code: cc });
+  // Send the full price list (existing ids kept) so other currencies/rule prices are not dropped.
+  const body = { prices };
+  if (!confirm) return dry(`POST /admin/products/${product_id}/variants/${variant_id}`, body, { sku: v.sku, before: v.prices, doc: DOC.variants });
+  const d = await req(`/admin/products/${encodeURIComponent(product_id)}/variants/${encodeURIComponent(variant_id)}`, { method: "POST", body });
+  return { dry_run: false, product_id, variant_id, sent: body, product_status: d.product?.status, doc: DOC.variants };
+}
+async function inventoryLevelUpdate({ inventory_item_id, location_id, stocked_quantity, confirm }) {
+  if (!inventory_item_id || !location_id || stocked_quantity === undefined) throw new Error("inventory_item_id, location_id and stocked_quantity are required");
+  const n = Number(stocked_quantity); if (!Number.isInteger(n) || n < 0) throw new Error("stocked_quantity must be a non-negative integer");
+  const item = (await req(`/admin/inventory-items/${encodeURIComponent(inventory_item_id)}?fields=id,sku,*location_levels`)).inventory_item;
+  const lvl = (item.location_levels || []).find((l) => l.location_id === location_id);
+  if (!lvl) throw new Error(`No level for ${inventory_item_id} at ${location_id}. Create the location level in Medusa Admin first (this tool only updates existing levels).`);
+  const warnings = n < (lvl.reserved_quantity || 0) ? [`new stocked_quantity ${n} is below reserved_quantity ${lvl.reserved_quantity}`] : [];
+  const path = `/admin/inventory-items/${inventory_item_id}/location-levels/${location_id}`;
+  if (!confirm) return dry(`POST ${path}`, { stocked_quantity: n }, { sku: item.sku, before: { stocked_quantity: lvl.stocked_quantity, reserved_quantity: lvl.reserved_quantity }, warnings, doc: DOC.inventory });
+  await req(`/admin/inventory-items/${encodeURIComponent(inventory_item_id)}/location-levels/${encodeURIComponent(location_id)}`, { method: "POST", body: { stocked_quantity: n } });
+  return { dry_run: false, sku: item.sku, location_id, stocked_quantity: n, warnings, doc: DOC.inventory };
+}
+
+// ---- golden rule: official docs first ----
+let indexCache = null;
+async function fetchText(url) { const ac = new AbortController(); const t = setTimeout(() => ac.abort(), TIMEOUT); try { const r = await fetch(url, { signal: ac.signal, headers: { Accept: "text/markdown, text/plain" } }); if (!r.ok) throw new Error(`HTTP ${r.status}`); return await r.text(); } finally { clearTimeout(t); } }
+async function medusaDocs({ query, page }) {
+  const origin = new URL(DOCS_BASE).origin;
+  if (page) {
+    const url = new URL(page, DOCS_BASE);
+    if (url.origin !== origin) throw new Error(`Refusing: page must be on the official docs origin ${origin}`);
+    const text = await fetchText(url.href).catch((e) => { throw new Error(`docs fetch failed (${e.message}) for ${url.href}`); });
+    const lines = text.split("\n");
+    const hits = query ? lines.map((l, i) => [i, l]).filter(([, l]) => l.toLowerCase().includes(String(query).toLowerCase())).slice(0, 20).map(([i]) => lines.slice(Math.max(0, i - 2), i + 3).join("\n")) : [];
+    return { url: url.href, ...(query ? { matches: hits, verdict: hits.length ? "FOUND" : `NOT IN OFFICIAL DOCS (page has no '${query}')` } : { excerpt: text.slice(0, 6000) }) };
+  }
+  if (!query) throw new Error("query or page is required");
+  if (!indexCache) indexCache = await fetchText(DOCS_INDEX).catch((e) => { throw new Error(`docs index fetch failed (${e.message}). Do not proceed from memory; retry or open ${DOCS_BASE} manually.`); });
+  const words = String(query).toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  const scored = indexCache.split("\n").map((l) => [l, words.filter((w) => l.toLowerCase().includes(w)).length]).filter(([, s]) => s > 0).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([l]) => l.trim());
+  return { index: DOCS_INDEX, matches: scored, verdict: scored.length ? "FOUND: open the best page with medusa_docs {page}" : "NOT IN OFFICIAL DOCS (no index match). Say so and mark any step UNVERIFIED.",
+    tip: "Medusa also hosts official remote MCPs (OAuth, Medusa Cloud account): Docs MCP https://docs.medusajs.com/mcp and read-only Cloud store MCP https://cloud.medusajs.com/mcp." };
+}
+
+const S = (props = {}, required = []) => ({ type: "object", properties: props, ...(required.length ? { required } : {}) });
+const str = { type: "string" }, num = { type: "number" }, bool = { type: "boolean" }, conf = { type: "boolean", description: "false/omitted = dry-run (default). true = execute." };
+const tools = {
+  store_health: { description: "Fail-loud health check: backend /health, admin secret-key auth, and (if a publishable key is set) Store API visibility. Verdict OK/WARN/FAIL. Read-only.", inputSchema: S(), run: storeHealth },
+  list_products: { description: "List products via the Admin API (q search, status draft|published|proposed|rejected, limit<=100, offset, optional fields). Read-only.", inputSchema: S({ q: str, status: str, limit: num, offset: num, fields: str }), run: listProducts },
+  get_product: { description: "Get one product with variants, categories, tags and sales channels. Read-only.", inputSchema: S({ id: str, fields: str }, ["id"]), run: getProduct },
+  list_variants: { description: "List a product's variants with SKUs, prices and options. Read-only.", inputSchema: S({ product_id: str, limit: num, offset: num }, ["product_id"]), run: listVariants },
+  inventory_levels: { description: "Inventory items with per-location stocked/reserved/available quantities (filter by sku or q). Read-only.", inputSchema: S({ sku: str, q: str, limit: num, offset: num }), run: inventoryLevels },
+  list_orders: { description: "List recent orders with PII-minimal fields (no email/address). Optional status, created_after (YYYY-MM-DD). Read-only.", inputSchema: S({ status: str, created_after: str, limit: num, offset: num }), run: listOrders },
+  get_order: { description: "Get one order with items and fulfillments. Customer email/shipping address only when include_customer=true. Read-only.", inputSchema: S({ id: str, include_customer: bool }, ["id"]), run: getOrder },
+  list_categories: { description: "List product categories (id, name, handle, active/internal, parent). Read-only.", inputSchema: S({ q: str, limit: num }), run: listCategories },
+  list_tags: { description: "List product tags (id, value). Read-only.", inputSchema: S({ q: str, limit: num }), run: listTags },
+  list_sales_channels: { description: "List sales channels. A product is only visible to a publishable key whose sales channel it is linked to. Read-only.", inputSchema: S(), run: listSalesChannels },
+  store_products: { description: "List products as a shopper sees them through MEDUSA_PUBLISHABLE_KEY (Store API). Read-only.", inputSchema: S({ q: str, region_id: str, limit: num }), run: storeProducts },
+  draft_product_create: { description: "Create a product with status=draft (always). images = list of already-hosted image URLs (first becomes thumbnail). Requires options + variants. Dry-run unless confirm=true; reads back and FAILS LOUD if not draft. Never publishes.", inputSchema: S({ title: str, handle: str, description: str, images: { type: "array", items: str }, options: { type: "array", items: { type: "object" } }, variants: { type: "array", items: { type: "object" } }, category_ids: { type: "array", items: str }, tag_ids: { type: "array", items: str }, sales_channel_ids: { type: "array", items: str }, metadata: { type: "object" }, confirm: conf }, ["title", "options", "variants"]), run: draftProductCreate },
+  draft_product_update: { description: "Update a DRAFT product (refuses non-draft products and any status change). patch = Admin API update body. Dry-run unless confirm=true.", inputSchema: S({ id: str, patch: { type: "object" }, confirm: conf }, ["id", "patch"]), run: draftProductUpdate },
+  variant_price_update: { description: "Set one currency's base price on a variant, keeping its other prices. Dry-run (shows before/after) unless confirm=true.", inputSchema: S({ product_id: str, variant_id: str, currency_code: str, amount: num, confirm: conf }, ["product_id", "variant_id", "currency_code", "amount"]), run: variantPriceUpdate },
+  inventory_level_update: { description: "Set stocked_quantity for an existing inventory level at a stock location. Dry-run (shows before) unless confirm=true.", inputSchema: S({ inventory_item_id: str, location_id: str, stocked_quantity: num, confirm: conf }, ["inventory_item_id", "location_id", "stocked_quantity"]), run: inventoryLevelUpdate },
+  medusa_docs: { description: "Golden Rule: search the official Medusa docs index (query) or read/grep an official docs page (page, optional query). Reports 'NOT IN OFFICIAL DOCS' when nothing matches. Call before any write or unfamiliar answer.", inputSchema: S({ query: str, page: str }), run: medusaDocs },
+};
+
+async function handle(msg) {
+  const { id, method, params } = msg;
+  const reply = (result) => ({ jsonrpc: "2.0", id, result });
+  if (method === "initialize") return reply({ protocolVersion: params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "medusa-commerce", version: VERSION } });
+  if (method === "ping") return reply({});
+  if (method === "tools/list") return reply({ tools: Object.entries(tools).map(([name, t]) => ({ name, description: t.description, inputSchema: t.inputSchema })) });
+  if (method === "tools/call") {
+    const t = tools[params?.name];
+    if (!t) return { jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool ${params?.name}` } };
+    try { const out = await t.run(params.arguments || {}); return reply({ content: [{ type: "text", text: scrub(JSON.stringify(out, null, 2)) }] }); }
+    catch (e) { return reply({ isError: true, content: [{ type: "text", text: `ERROR: ${scrub(e.message)}` }] }); }
+  }
+  if (id === undefined) return null;
+  return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } };
+}
+
+if ((env.MCP_TRANSPORT || "stdio") === "http") {
+  const port = Number(env.MCP_PORT || 8788), bind = env.MCP_BIND || "127.0.0.1";
+  http.createServer(async (rq, res) => {
+    if (rq.url !== "/mcp") { res.writeHead(404).end(); return; }
+    if (env.MCP_AUTH_TOKEN && rq.headers.authorization !== `Bearer ${env.MCP_AUTH_TOKEN}`) { res.writeHead(401).end(); return; }
+    if (rq.method !== "POST") { res.writeHead(405).end(); return; }
+    let data = ""; for await (const c of rq) data += c;
+    try {
+      const m = JSON.parse(data);
+      const out = Array.isArray(m) ? (await Promise.all(m.map(handle))).filter(Boolean) : await handle(m);
+      if (!out || (Array.isArray(out) && !out.length)) { res.writeHead(202).end(); return; }
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(out));
+    } catch { res.writeHead(400).end(); }
+  }).listen(port, bind, () => console.error(`medusa-commerce MCP http on ${bind}:${port}/mcp`));
+} else {
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.on("line", async (line) => { if (!line.trim()) return; let m; try { m = JSON.parse(line); } catch { return; } const out = await handle(m); if (out) process.stdout.write(JSON.stringify(out) + "\n"); });
+}
