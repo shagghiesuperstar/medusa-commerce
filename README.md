@@ -30,7 +30,7 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 |---|---|
 | MCP server (zero-dependency Node ≥ 18; stdio or HTTP) | `server/index.mjs` |
 | MCP config (stdio) / remote + official MCP example | `mcp.json`, `mcp.remote.example.json` |
-| Skills (8) | `skills/` |
+| Skills (13), known-issues reference | `skills/`, `references/` |
 | mcloud CLI installer (persistent, self-restoring) | `scripts/setup-mcloud.sh` |
 | Manifests | `.cursor-plugin/plugin.json`, `plugin.json` |
 | Lessons, changelog | `docs/LESSONS.md`, `CHANGELOG.md` |
@@ -55,7 +55,9 @@ This plugin complements them. It works with **any** Medusa v2 backend (including
 | `medusa_docs` | docs | docs.medusajs.com index and pages |
 
 ### Skills
-`getting-started` · `golden-rule-read-docs-first` · `draft-product-pipeline` · `catalog-hygiene` · `inventory-sync-tips` · `live-publishing-opt-in` · `medusa-cloud-cli` · `compound-learnings`
+`getting-started` · `golden-rule-read-docs-first` · `draft-product-pipeline` · `catalog-hygiene` · `inventory-sync-tips` · `live-publishing-opt-in` · `medusa-cloud-cli` · `medusa-cloud-environments` · `medusa-erp-inventory-sync` · `medusa-admin-orphan-links` · `medusa-cart-taxes` · `medusa-multi-entity-architecture` · `compound-learnings`
+
+Reference: [`references/known-issues.md`](references/known-issues.md) (GitHub issues to know about, existence verified).
 
 ## Safety model
 - **Read-only by default.** Every write returns `dry_run: true` with the exact request (and the current values) until it's called with `confirm=true`.

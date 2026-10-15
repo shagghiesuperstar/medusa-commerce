@@ -17,7 +17,7 @@ function start(extra = {}) {
 }
 const results = []; const check = (name, cond) => results.push([name, !!cond]); const outs = [];
 const A = start();
-const init = await A.rpc("initialize", { protocolVersion: "2025-06-18" }); check("server reports v1.1.0", init.result.serverInfo.version === "1.1.0");
+const init = await A.rpc("initialize", { protocolVersion: "2025-06-18" }); check("server reports v1.2.0", init.result.serverInfo.version === "1.2.0");
 const names = (await A.rpc("tools/list", {})).result.tools.map((t) => t.name); console.log("tools:", names.join(", ")); check("18 tools listed", names.length === 18);
 const h = await A.call("store_health"); outs.push(h); check("store_health OK with backend, secret key and publishable key", h.verdict === "OK" && h.checks.length === 3);
 const lp = await A.call("list_products"); outs.push(lp); check("list_products returns count", lp.count === 4);

@@ -8,7 +8,7 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
       "check": "backend /health",
       "ok": true,
       "http_status": 200,
-      "latency_ms": 61,
+      "latency_ms": 64,
       "doc": "https://docs.medusajs.com/learn/deployment (\"<APP_URL>/health returns OK\")"
     },
     {
@@ -384,7 +384,7 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
   "doc": "https://docs.medusajs.com/api/admin#products"
 }
 
-PASS  server reports v1.1.0
+PASS  server reports v1.2.0
 PASS  18 tools listed
 PASS  store_health OK with backend, secret key and publishable key
 PASS  list_products returns count

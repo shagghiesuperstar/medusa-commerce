@@ -10,6 +10,7 @@ const patterns = [
   [/\b[a-z0-9-]+\.medusajs\.(site|app)\b/g, "hosted store domain"],
   [/\b[\w-]+\.ts\.net\b/g, "private-network hostname"],
   [/(api[_-]?key|secret|token|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{16,}["']/gi, "hardcoded secret"],
+  [/\b(?:sloc|sc|scloc|prod|variant|order|cart|cus|iitem|ilev|pk|apk|reg|store)_[0-9A-Z]{20,}\b/g, "real-looking Medusa resource ID"],
   [/gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}/g, "provider token"],
 ];
 const deny = process.env.PRIVACY_DENYLIST ? fs.readFileSync(process.env.PRIVACY_DENYLIST, "utf8").split("\n").map((s) => s.trim()).filter(Boolean) : [];
