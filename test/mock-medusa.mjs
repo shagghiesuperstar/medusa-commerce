@@ -7,8 +7,12 @@ const db = {
     { id: "prod_1", title: "Sample Tee", handle: "sample-tee", status: "published", thumbnail: null, sales_channels: [{ id: "sc_1" }], categories: [], tags: [{ id: "ptag_1", value: "new" }],
       variants: [{ id: "variant_1", title: "S", sku: "TEE-S", manage_inventory: true, prices: [{ id: "price_1", amount: 20, currency_code: "usd" }, { id: "price_2", amount: 18, currency_code: "eur" }], options: [] }] },
     { id: "prod_2", title: "Draft Mug", handle: "draft-mug", status: "draft", sales_channels: [], categories: [], tags: [], metadata: {}, variants: [{ id: "variant_2", title: "Default", sku: "MUG-1", prices: [{ id: "price_3", amount: 12, currency_code: "usd" }] }] },
+    { id: "prod_3", title: "Zero Stock Draft", handle: "zero-stock", status: "draft", thumbnail: "https://cdn.example.com/z.png", sales_channels: [{ id: "sc_1" }], categories: [], tags: [], variants: [{ id: "variant_3", title: "Default", sku: "ZERO-1", manage_inventory: true, prices: [{ id: "price_4", amount: 9, currency_code: "usd" }] }] },
+    { id: "prod_4", title: "Ready Draft", handle: "ready-draft", status: "draft", thumbnail: "https://cdn.example.com/r.png", sales_channels: [{ id: "sc_1" }], categories: [], tags: [], variants: [{ id: "variant_4", title: "Default", sku: "READY-1", manage_inventory: true, prices: [{ id: "price_5", amount: 30, currency_code: "usd" }] }] },
   ],
-  inventory: [{ id: "iitem_1", sku: "TEE-S", title: "Sample Tee S", location_levels: [{ location_id: "sloc_1", stocked_quantity: 10, reserved_quantity: 2, available_quantity: 8 }] }],
+  inventory: [{ id: "iitem_1", sku: "TEE-S", title: "Sample Tee S", location_levels: [{ location_id: "sloc_1", stocked_quantity: 10, reserved_quantity: 2, available_quantity: 8 }] },
+    { id: "iitem_3", sku: "ZERO-1", title: "Zero", location_levels: [{ location_id: "sloc_1", stocked_quantity: 0, reserved_quantity: 0, available_quantity: 0 }] },
+    { id: "iitem_4", sku: "READY-1", title: "Ready", location_levels: [{ location_id: "sloc_1", stocked_quantity: 5, reserved_quantity: 0, available_quantity: 5 }] }],
   orders: [{ id: "order_1", display_id: 1, status: "pending", payment_status: "captured", fulfillment_status: "not_fulfilled", total: 20, currency_code: "usd", created_at: "2026-10-01T00:00:00Z", email: "buyer@example.com", shipping_address: { city: "Example" }, items: [], fulfillments: [] }],
   categories: [{ id: "pcat_1", name: "Apparel", handle: "apparel", is_active: true, is_internal: false, parent_category_id: null }],
   tags: [{ id: "ptag_1", value: "new" }], channels: [{ id: "sc_1", name: "Default Sales Channel", is_disabled: false }],
@@ -43,6 +47,9 @@ http.createServer(async (req, res) => {
   if (p === "/admin/sales-channels") return list("sales_channels", db.channels);
   return send(res, 404, { message: "not found" });
 }).listen(PORT, "127.0.0.1", () => console.error(`mock medusa on 127.0.0.1:${PORT}`));
+// A backend that resets every connection (simulates blocked egress / TLS reset).
+const RESET = Number(process.env.MOCK_RESET_PORT || 19098);
+import("node:net").then(({ default: net }) => net.createServer((sock) => sock.destroy()).listen(RESET, "127.0.0.1", () => console.error(`mock reset on 127.0.0.1:${RESET}`)));
 http.createServer((req, res) => {
   if (req.url === "/llms.txt") return res.writeHead(200).end("# Medusa\n- [Admin API Reference](http://127.0.0.1:" + DOCS + "/api/admin): authentication with secret API keys, products, inventory\n- [Product Module](http://127.0.0.1:" + DOCS + "/resources/commerce-modules/product): products, variants, draft status\n- [Sales Channel Module](http://127.0.0.1:" + DOCS + "/resources/commerce-modules/sales-channel): publishable API keys scope store requests\n");
   if (req.url === "/api/admin") return res.writeHead(200).end("# Admin API\n## Authentication\nPass the API key token in the Authorization Basic header.\n## Products\nstatus can be draft or published.\n");

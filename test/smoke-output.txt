@@ -1,4 +1,4 @@
-tools: store_health, list_products, get_product, list_variants, inventory_levels, list_orders, get_order, list_categories, list_tags, list_sales_channels, store_products, draft_product_create, draft_product_update, variant_price_update, inventory_level_update, medusa_docs
+tools: store_health, list_products, get_product, list_variants, inventory_levels, list_orders, get_order, list_categories, list_tags, list_sales_channels, store_products, draft_product_create, draft_product_update, variant_price_update, inventory_level_update, product_publish, live_product_update, medusa_docs
 
 ### store_health {}
 {
@@ -8,14 +8,14 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
       "check": "backend /health",
       "ok": true,
       "http_status": 200,
-      "latency_ms": 59,
+      "latency_ms": 61,
       "doc": "https://docs.medusajs.com/learn/deployment (\"<APP_URL>/health returns OK\")"
     },
     {
       "check": "admin auth (secret key)",
       "ok": true,
       "http_status": 200,
-      "product_count": 2,
+      "product_count": 4,
       "doc": "https://docs.medusajs.com/api/admin#authentication"
     },
     {
@@ -30,7 +30,7 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
 
 ### list_products {}
 {
-  "count": 2,
+  "count": 4,
   "offset": 0,
   "limit": 20,
   "products": [
@@ -245,7 +245,7 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
 {
   "dry_run": false,
   "created": {
-    "id": "prod_3",
+    "id": "prod_5",
     "status": "draft",
     "handle": "new-cap",
     "thumbnail": "https://cdn.example.com/cap.png"
@@ -299,6 +299,7 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
     ]
   },
   "sku": "TEE-S",
+  "product_status": "published",
   "before": [
     {
       "id": "price_1",
@@ -311,9 +312,12 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
       "currency_code": "eur"
     }
   ],
+  "live_store_write": {
+    "opt_in": "MISSING: set MEDUSA_ALLOW_PUBLISH=true before confirm=true works",
+    "what": "price change on a live product"
+  },
   "doc": "https://docs.medusajs.com/api/admin#products_getproductsidvariants",
-  "next": "Review, then call again with confirm=true to execute."
-}
+  "next": "R
 
 ### inventory_level_update {"inventory_item_id":"iitem_1","location_id":"sloc_1","stocked_quantity":1}
 {
@@ -330,8 +334,32 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
   "warnings": [
     "new stocked_quantity 1 is below reserved_quantity 2"
   ],
+  "live_store_write": {
+    "opt_in": "MISSING: set MEDUSA_ALLOW_PUBLISH=true before confirm=true works",
+    "what": "stock change"
+  },
   "doc": "https://docs.medusajs.com/api/admin#inventory-items",
   "next": "Review, then call again with confirm=true to execute."
+}
+
+### product_publish {"id":"prod_4"}
+{
+  "dry_run": true,
+  "request": "POST /admin/products/prod_4",
+  "body": {
+    "status": "published"
+  },
+  "current_status": "draft",
+  "sales_channels": 1,
+  "variants": 1,
+  "blockers": [],
+  "warnings": [],
+  "live_store_write": {
+    "opt_in": "MISSING: set MEDUSA_ALLOW_PUBLISH=true before confirm=true works",
+    "what": "publish"
+  },
+  "next": "Review, then confirm=true (needs MEDUSA_ALLOW_PUBLISH=true).",
+  "doc": "https://docs.medusajs.com/api/admin#products"
 }
 
 ### medusa_docs {"query":"publishable api keys"}
@@ -345,8 +373,19 @@ tools: store_health, list_products, get_product, list_variants, inventory_levels
   "tip": "Medusa also hosts official remote MCPs (OAuth, Medusa Cloud account): Docs MCP https://docs.medusajs.com/mcp and read-only Cloud store MCP https://cloud.medusajs.com/mcp."
 }
 
-PASS  server reports v1.0.0
-PASS  16 tools listed
+### product_publish {"id":"prod_4","confirm":true}
+{
+  "dry_run": false,
+  "id": "prod_4",
+  "status": "published",
+  "verified": "read back status=published",
+  "warnings": [],
+  "next": "Check it with store_products (shopper view).",
+  "doc": "https://docs.medusajs.com/api/admin#products"
+}
+
+PASS  server reports v1.1.0
+PASS  18 tools listed
 PASS  store_health OK with backend, secret key and publishable key
 PASS  list_products returns count
 PASS  list_products filters status=draft
@@ -368,15 +407,29 @@ PASS  SAFETY never publishes: status change refused
 PASS  SAFETY draft_product_update refuses non-draft products
 PASS  draft_product_update dry-run + nested metadata warning
 PASS  SAFETY price update dry-run keeps other currencies
-PASS  LESSON price update does not drop other currencies
 PASS  SAFETY inventory update dry-run shows before + warns below reserved
 PASS  inventory update fails loud on missing location level
-PASS  inventory update confirm writes
+PASS  OPT-IN publish refused without MEDUSA_ALLOW_PUBLISH
+PASS  OPT-IN publish dry-run without confirm (no blockers, opt-in flagged missing)
+PASS  OPT-IN price change on live product refused without opt-in
+PASS  OPT-IN stock change refused without opt-in
+PASS  OPT-IN live_product_update refused without opt-in
+PASS  prod_4 still draft after refused publish
 PASS  medusa_docs finds index entries
 PASS  GOLDEN RULE: missing topic -> NOT IN OFFICIAL DOCS
 PASS  medusa_docs greps an official page
 PASS  medusa_docs refuses non-official origins
 PASS  LESSON no secrets in tool output
+PASS  LESSON no zero-stock publish: blocker listed
+PASS  LESSON zero-stock publish refused even with opt-in + confirm
+PASS  LESSON sales-channel check: no-channel draft cannot publish
+PASS  OPT-IN publish succeeds with opt-in + confirm and reads back published
+PASS  published product now visible in store_products
+PASS  live_product_update refuses status in patch
+PASS  OPT-IN live_product_update writes with opt-in + confirm
+PASS  LESSON price update does not drop other currencies
+PASS  inventory update confirm writes (opt-in)
+PASS  LESSON (live test) connection reset -> FAIL with network/egress hint
 PASS  LESSON fail-loud: bad secret key -> FAIL
 PASS  401 error names the key type, never the key
 PASS  LESSON fail-loud: unreachable backend -> FAIL
@@ -384,4 +437,4 @@ PASS  no publishable key -> WARN, not silent OK
 PASS  store_products without publishable key fails loud
 PASS  missing admin key fails loud with setup hint
 
-SMOKE PASS (38/38)
+SMOKE PASS (52/52)

@@ -2,11 +2,14 @@
   "mcpServers": {
     "medusa-commerce": {
       "command": "node",
-      "args": ["${CURSOR_PLUGIN_ROOT}/server/index.mjs"],
+      "args": [
+        "${CURSOR_PLUGIN_ROOT}/server/index.mjs"
+      ],
       "env": {
         "MEDUSA_BACKEND_URL": "${MEDUSA_BACKEND_URL}",
         "MEDUSA_ADMIN_API_KEY": "${MEDUSA_ADMIN_API_KEY}",
-        "MEDUSA_PUBLISHABLE_KEY": "${MEDUSA_PUBLISHABLE_KEY}"
+        "MEDUSA_PUBLISHABLE_KEY": "${MEDUSA_PUBLISHABLE_KEY}",
+        "MEDUSA_ALLOW_PUBLISH": "${MEDUSA_ALLOW_PUBLISH}"
       }
     }
   }

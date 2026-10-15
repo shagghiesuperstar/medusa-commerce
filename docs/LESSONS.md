@@ -81,3 +81,19 @@ Generic lessons gathered from real Medusa v2 operations, scrubbed of all names, 
 - Checked against: UNVERIFIED (not in official docs)
 - Encoded in: README Recommended architecture
 - Regression: manual
+
+### 2026-10-15: Connection reset is not "store down"
+- Symptom: live read-only test got ECONNRESET / TLS reset on every call, while the docs site loaded fine.
+- Root cause: the agent machine's network egress blocked the store's hosting domain at the TLS handshake. The store itself was not the problem.
+- Fix / rule: health FAILs loud, with a hint naming network/egress/TLS, and asks for `curl <url>/health` from the same machine. Run live tests from a machine that can reach the backend.
+- Checked against: UNVERIFIED (not in official docs): environment-specific
+- Encoded in: server req() network hint
+- Regression: test/smoke.mjs "LESSON (live test) connection reset"
+
+### 2026-10-15: Publishing is an operator opt-in, one product at a time
+- Symptom: pipelines that can publish tend to publish too much: zero-stock items, items with no channel.
+- Root cause: no gate between "draft" and "live".
+- Fix / rule: MEDUSA_ALLOW_PUBLISH=true plus confirm=true; pre-publish blockers for sales channel, prices and zero stock; read back; no bulk tool.
+- Checked against: https://docs.medusajs.com/api/admin
+- Encoded in: skills/live-publishing-opt-in/SKILL.md
+- Regression: test/smoke.mjs "OPT-IN ..." and "LESSON no zero-stock publish"

@@ -6,11 +6,12 @@
 import http from "node:http";
 import readline from "node:readline";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const env = process.env;
 const BASE = (env.MEDUSA_BACKEND_URL || "").replace(/\/+$/, "");
 const ADMIN_KEY = env.MEDUSA_ADMIN_API_KEY || "";
 const PUB_KEY = env.MEDUSA_PUBLISHABLE_KEY || "";
+const ALLOW_PUBLISH = /^(1|true|yes)$/i.test(env.MEDUSA_ALLOW_PUBLISH || "");
 const TIMEOUT = Number(env.MEDUSA_TIMEOUT_MS || 15000);
 const DOCS_BASE = (env.MEDUSA_DOCS_BASE || "https://docs.medusajs.com/").replace(/\/?$/, "/");
 const DOCS_INDEX = env.MEDUSA_DOCS_INDEX || `${DOCS_BASE}llms.txt`;
@@ -57,7 +58,8 @@ async function req(path, { method = "GET", body, admin = true, store = false, ra
   } catch (e) {
     if (e.name === "AbortError") throw new Error(`${method} ${path} -> timeout after ${TIMEOUT}ms`);
     if (e.message?.includes("HTTP")) throw e;
-    throw new Error(scrub(`${method} ${path} -> ${e.cause?.code || e.message}`));
+    const code = e.cause?.code || e.message; const nh = /ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|CERT|SSL|TLS|socket/i.test(code) ? " (network: backend down, wrong MEDUSA_BACKEND_URL, or this machine's egress/TLS to the backend is blocked; try `curl <url>/health` from the same machine)" : "";
+    throw new Error(scrub(`${method} ${path} -> ${code}${nh}`));
   } finally { clearTimeout(t); }
 }
 const qs = (o) => { const p = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") p.set(k, String(v)); const s = p.toString(); return s ? `?${s}` : ""; };
@@ -116,6 +118,9 @@ async function listTags({ q, limit }) { const d = await req(`/admin/product-tags
 async function listSalesChannels() { const d = await req(`/admin/sales-channels${qs({ fields: "id,name,is_disabled" })}`); return { count: d.count, sales_channels: d.sales_channels, doc: DOC.sales_channels }; }
 async function storeProducts({ q, limit, region_id }) { const d = await req(`/store/products${qs({ q, region_id, limit: lim(limit), fields: "id,title,handle" })}`, { admin: false, store: true }); return { count: d.count, products: d.products, note: "What a shopper sees through this publishable key's sales channel(s).", doc: DOC.store_products }; }
 
+const optIn = (what) => { if (!ALLOW_PUBLISH) throw new Error(`Refusing ${what}: live-store writes are disabled. Set MEDUSA_ALLOW_PUBLISH=true (operator opt-in) AND pass confirm=true. Default is draft-only.`); };
+const gate = (what, confirm) => ({ opt_in: ALLOW_PUBLISH ? "MEDUSA_ALLOW_PUBLISH=true" : "MISSING: set MEDUSA_ALLOW_PUBLISH=true before confirm=true works", what });
+
 // ---- writes: draft-only, dry-run unless confirm=true ----
 async function draftProductCreate({ title, handle, description, images, options, variants, category_ids, tag_ids, sales_channel_ids, metadata, confirm }) {
   if (!title) throw new Error("title is required");
@@ -149,27 +154,75 @@ async function variantPriceUpdate({ product_id, variant_id, currency_code, amoun
   if (!product_id || !variant_id || !currency_code || amount === undefined) throw new Error("product_id, variant_id, currency_code and amount are required");
   if (!(Number(amount) >= 0)) throw new Error("amount must be a non-negative number in the currency's main unit as stored by your store (check an existing price first)");
   const cc = String(currency_code).toLowerCase();
+  const pst = (await req(`/admin/products/${encodeURIComponent(product_id)}?fields=id,status`)).product.status;
+  const live = pst !== "draft";
+  if (live && confirm) optIn(`price change on ${pst} product ${product_id}`);
   const v = (await req(`/admin/products/${encodeURIComponent(product_id)}/variants/${encodeURIComponent(variant_id)}?fields=id,sku,*prices`)).variant;
   const prices = (v.prices || []).map((p) => ({ id: p.id, amount: p.amount, currency_code: p.currency_code, ...(p.rules && Object.keys(p.rules).length ? { rules: p.rules } : {}) }));
   const hit = prices.find((p) => p.currency_code === cc && !p.rules);
   if (hit) hit.amount = Number(amount); else prices.push({ amount: Number(amount), currency_code: cc });
   // Send the full price list (existing ids kept) so other currencies/rule prices are not dropped.
   const body = { prices };
-  if (!confirm) return dry(`POST /admin/products/${product_id}/variants/${variant_id}`, body, { sku: v.sku, before: v.prices, doc: DOC.variants });
+  if (!confirm) return dry(`POST /admin/products/${product_id}/variants/${variant_id}`, body, { sku: v.sku, product_status: pst, before: v.prices, ...(live ? { live_store_write: gate("price change on a live product") } : {}), doc: DOC.variants });
   const d = await req(`/admin/products/${encodeURIComponent(product_id)}/variants/${encodeURIComponent(variant_id)}`, { method: "POST", body });
   return { dry_run: false, product_id, variant_id, sent: body, product_status: d.product?.status, doc: DOC.variants };
 }
 async function inventoryLevelUpdate({ inventory_item_id, location_id, stocked_quantity, confirm }) {
   if (!inventory_item_id || !location_id || stocked_quantity === undefined) throw new Error("inventory_item_id, location_id and stocked_quantity are required");
   const n = Number(stocked_quantity); if (!Number.isInteger(n) || n < 0) throw new Error("stocked_quantity must be a non-negative integer");
+  if (confirm) optIn("stock change (inventory levels are always live)");
   const item = (await req(`/admin/inventory-items/${encodeURIComponent(inventory_item_id)}?fields=id,sku,*location_levels`)).inventory_item;
   const lvl = (item.location_levels || []).find((l) => l.location_id === location_id);
   if (!lvl) throw new Error(`No level for ${inventory_item_id} at ${location_id}. Create the location level in Medusa Admin first (this tool only updates existing levels).`);
   const warnings = n < (lvl.reserved_quantity || 0) ? [`new stocked_quantity ${n} is below reserved_quantity ${lvl.reserved_quantity}`] : [];
   const path = `/admin/inventory-items/${inventory_item_id}/location-levels/${location_id}`;
-  if (!confirm) return dry(`POST ${path}`, { stocked_quantity: n }, { sku: item.sku, before: { stocked_quantity: lvl.stocked_quantity, reserved_quantity: lvl.reserved_quantity }, warnings, doc: DOC.inventory });
+  if (!confirm) return dry(`POST ${path}`, { stocked_quantity: n }, { sku: item.sku, before: { stocked_quantity: lvl.stocked_quantity, reserved_quantity: lvl.reserved_quantity }, warnings, live_store_write: gate("stock change"), doc: DOC.inventory });
   await req(`/admin/inventory-items/${encodeURIComponent(inventory_item_id)}/location-levels/${encodeURIComponent(location_id)}`, { method: "POST", body: { stocked_quantity: n } });
   return { dry_run: false, sku: item.sku, location_id, stocked_quantity: n, warnings, doc: DOC.inventory };
+}
+
+// ---- opt-in live writes: MEDUSA_ALLOW_PUBLISH=true AND confirm=true ----
+async function productPublish({ id, allow_zero_stock, confirm }) {
+  if (!id) throw new Error("id is required");
+  const p = (await req(`/admin/products/${encodeURIComponent(id)}?fields=id,title,status,thumbnail,*sales_channels,*variants,*variants.prices`)).product;
+  if (p.status === "published") return { already_published: true, id, doc: DOC.products };
+  const blockers = [], warnings = [];
+  if (!(p.sales_channels || []).length) blockers.push("no sales channel: it would be invisible to every publishable key");
+  if (!(p.variants || []).length) blockers.push("no variants");
+  const noPrice = (p.variants || []).filter((v) => !(v.prices || []).length).map((v) => v.sku || v.id);
+  if (noPrice.length) blockers.push(`variants without prices: ${noPrice.join(", ")}`);
+  const managed = (p.variants || []).filter((v) => v.manage_inventory !== false);
+  // Stock via the verified inventory-items route, matched by SKU. Unknown stock (no SKU / no item) counts as unknown, not zero.
+  const stock = [];
+  for (const v of managed) {
+    if (!v.sku) { stock.push(null); continue; }
+    const items = (await req(`/admin/inventory-items${qs({ sku: v.sku, fields: "id,sku,*location_levels" })}`)).inventory_items || [];
+    stock.push(items.length ? items.reduce((a, i) => a + (i.location_levels || []).reduce((b, l) => b + (Number(l.stocked_quantity) || 0), 0), 0) : null);
+  }
+  if (stock.includes(null)) warnings.push("stock unknown for some variants (no SKU or no inventory item)");
+  const zero = stock.length > 0 && stock.every((q) => q === 0);
+  if (zero && !allow_zero_stock) blockers.push("all inventory-managed variants have zero stock (no publishing zero-stock items; pass allow_zero_stock=true only for deliberate pre-orders)");
+  if (!p.thumbnail) warnings.push("no thumbnail");
+  const plan = { request: `POST /admin/products/${id}`, body: { status: "published" }, current_status: p.status, sales_channels: (p.sales_channels || []).length, variants: (p.variants || []).length };
+  if (!confirm) return { dry_run: true, ...plan, blockers, warnings, live_store_write: gate("publish"), next: blockers.length ? "Fix blockers first." : "Review, then confirm=true (needs MEDUSA_ALLOW_PUBLISH=true).", doc: DOC.products };
+  optIn("publish");
+  if (blockers.length) throw new Error(`Refusing to publish ${id}: ${blockers.join("; ")}`);
+  await req(`/admin/products/${encodeURIComponent(id)}`, { method: "POST", body: { status: "published" } });
+  const back = (await req(`/admin/products/${encodeURIComponent(id)}?fields=id,status`)).product;
+  if (back.status !== "published") throw new Error(`FAIL LOUD: ${id} reads back status=${back.status} after publish.`);
+  return { dry_run: false, id, status: back.status, verified: "read back status=published", warnings, next: "Check it with store_products (shopper view).", doc: DOC.products };
+}
+async function liveProductUpdate({ id, patch, confirm }) {
+  if (!id || !patch || typeof patch !== "object") throw new Error("id and patch are required");
+  if ("status" in patch) throw new Error("Use product_publish to change status (it runs the pre-publish checks).");
+  const cur = (await req(`/admin/products/${encodeURIComponent(id)}?fields=id,title,status,handle,metadata`)).product;
+  const warnings = [];
+  if (patch.metadata && Object.values(patch.metadata).some((v) => v && typeof v === "object" && !Array.isArray(v))) warnings.push("nested metadata objects are REPLACED, not merged");
+  if ("handle" in patch) warnings.push("changing handle changes the storefront URL");
+  if (!confirm) return dry(`POST /admin/products/${id}`, patch, { current: cur, warnings, live_store_write: gate("live product edit"), doc: DOC.products });
+  optIn("live product edit");
+  const d = await req(`/admin/products/${encodeURIComponent(id)}`, { method: "POST", body: patch });
+  return { dry_run: false, product: { id: d.product.id, status: d.product.status, title: d.product.title }, warnings, doc: DOC.products };
 }
 
 // ---- golden rule: official docs first ----
@@ -209,8 +262,10 @@ const tools = {
   store_products: { description: "List products as a shopper sees them through MEDUSA_PUBLISHABLE_KEY (Store API). Read-only.", inputSchema: S({ q: str, region_id: str, limit: num }), run: storeProducts },
   draft_product_create: { description: "Create a product with status=draft (always). images = list of already-hosted image URLs (first becomes thumbnail). Requires options + variants. Dry-run unless confirm=true; reads back and FAILS LOUD if not draft. Never publishes.", inputSchema: S({ title: str, handle: str, description: str, images: { type: "array", items: str }, options: { type: "array", items: { type: "object" } }, variants: { type: "array", items: { type: "object" } }, category_ids: { type: "array", items: str }, tag_ids: { type: "array", items: str }, sales_channel_ids: { type: "array", items: str }, metadata: { type: "object" }, confirm: conf }, ["title", "options", "variants"]), run: draftProductCreate },
   draft_product_update: { description: "Update a DRAFT product (refuses non-draft products and any status change). patch = Admin API update body. Dry-run unless confirm=true.", inputSchema: S({ id: str, patch: { type: "object" }, confirm: conf }, ["id", "patch"]), run: draftProductUpdate },
-  variant_price_update: { description: "Set one currency's base price on a variant, keeping its other prices. Dry-run (shows before/after) unless confirm=true.", inputSchema: S({ product_id: str, variant_id: str, currency_code: str, amount: num, confirm: conf }, ["product_id", "variant_id", "currency_code", "amount"]), run: variantPriceUpdate },
-  inventory_level_update: { description: "Set stocked_quantity for an existing inventory level at a stock location. Dry-run (shows before) unless confirm=true.", inputSchema: S({ inventory_item_id: str, location_id: str, stocked_quantity: num, confirm: conf }, ["inventory_item_id", "location_id", "stocked_quantity"]), run: inventoryLevelUpdate },
+  variant_price_update: { description: "Set one currency's base price on a variant, keeping its other prices. Dry-run (shows before/after) unless confirm=true. On non-draft (live) products confirm also needs MEDUSA_ALLOW_PUBLISH=true.", inputSchema: S({ product_id: str, variant_id: str, currency_code: str, amount: num, confirm: conf }, ["product_id", "variant_id", "currency_code", "amount"]), run: variantPriceUpdate },
+  inventory_level_update: { description: "Set stocked_quantity for an existing inventory level at a stock location. Dry-run (shows before) unless confirm=true; confirm also needs MEDUSA_ALLOW_PUBLISH=true (stock is always live).", inputSchema: S({ inventory_item_id: str, location_id: str, stocked_quantity: num, confirm: conf }, ["inventory_item_id", "location_id", "stocked_quantity"]), run: inventoryLevelUpdate },
+  product_publish: { description: "OPT-IN: publish one product (draft -> published). Requires MEDUSA_ALLOW_PUBLISH=true AND confirm=true. Pre-checks: sales channel, prices, non-zero stock (unless allow_zero_stock). Dry-run lists blockers; confirm reads back. One product per call: no bulk publish.", inputSchema: S({ id: str, allow_zero_stock: bool, confirm: conf }, ["id"]), run: productPublish },
+  live_product_update: { description: "OPT-IN: edit any product including live ones (no status changes; use product_publish). Requires MEDUSA_ALLOW_PUBLISH=true AND confirm=true. Dry-run shows current values.", inputSchema: S({ id: str, patch: { type: "object" }, confirm: conf }, ["id", "patch"]), run: liveProductUpdate },
   medusa_docs: { description: "Golden Rule: search the official Medusa docs index (query) or read/grep an official docs page (page, optional query). Reports 'NOT IN OFFICIAL DOCS' when nothing matches. Call before any write or unfamiliar answer.", inputSchema: S({ query: str, page: str }), run: medusaDocs },
 };
 

@@ -2,7 +2,7 @@
 import fs from "node:fs"; import path from "node:path";
 const root = new URL("..", import.meta.url).pathname; let fail = 0;
 const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}  ${m}`); if (!c) fail++; };
-const required = ["getting-started", "golden-rule-read-docs-first", "draft-product-pipeline", "catalog-hygiene", "inventory-sync-tips", "compound-learnings"];
+const required = ["getting-started", "golden-rule-read-docs-first", "draft-product-pipeline", "catalog-hygiene", "inventory-sync-tips", "compound-learnings", "live-publishing-opt-in", "medusa-cloud-cli"];
 const dirs = fs.readdirSync(path.join(root, "skills"));
 for (const r of required) ok(dirs.includes(r), `skill present: ${r}`);
 for (const d of dirs) {
@@ -18,6 +18,8 @@ for (const l of lessons) ok(/Checked against: (https:\/\/docs\.medusajs\.com\/\S
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 ok(/## Golden Rule/.test(readme) && readme.indexOf("Golden Rule") < readme.indexOf("## What's inside"), "README opens with the Golden Rule");
 ok(readme.includes("@pixelrainbownft") && readme.includes("https://pixelrainbow.ai") && /coming soon/i.test(readme), "README credits + companion template marked coming soon");
+const lp = fs.readFileSync(path.join(root, "skills/live-publishing-opt-in/SKILL.md"), "utf8");
+ok(/one SKU/i.test(lp) && /read back/i.test(lp) && /zero-stock/i.test(lp) && /sales-channel/i.test(lp), "publishing skill has all four cautions");
 const pj = JSON.parse(fs.readFileSync(path.join(root, ".cursor-plugin/plugin.json"), "utf8"));
 ok(/^1\.\d+\.\d+$/.test(pj.version) && /official Medusa docs/i.test(pj.description), "manifest v1.x and golden rule in description");
 console.log(fail ? `\nSKILLS TEST FAIL (${fail})` : "\nSKILLS TEST PASS"); process.exit(fail ? 1 : 0);
